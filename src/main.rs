@@ -175,7 +175,10 @@ fn run(
                         }
                         true
                     }
-                    Ok(AppEvent::Resize) => true,
+                    Ok(AppEvent::Resize) => {
+                        terminal.clear().ok();
+                        true
+                    }
                     Ok(AppEvent::Fs(fs_ev)) => {
                         store.apply_fs_event(fs_ev, args.debug);
                         true

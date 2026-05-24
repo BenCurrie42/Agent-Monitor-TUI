@@ -1,6 +1,6 @@
 [package]
 name = "agent-monitor-tui"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2021"
 description = "AgentMonitorTUI — passive, lazydocker-style TUI for monitoring Claude Code sessions"
 license = "MIT"

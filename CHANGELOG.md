@@ -4,6 +4,13 @@ All notable changes are documented here.
 
 ---
 
+## [0.0.5] — 2026-05-23
+
+### Fixed
+- **Phantom characters** — Ratatui alternates two buffer slots and only flushes cell diffs; cells not explicitly rendered in a frame retain their symbol from 2 frames prior, and if both slots hold the same stale symbol no diff is generated and the terminal keeps showing old content. Fixed by rendering `Clear` over every panel area and over the full terminal at the start of each frame so uncovered cells are guaranteed to diff as spaces against any prior content.
+- **Detail modal scroll locked after `G`** — `clamp_scroll` used logical line count, but `Paragraph::scroll` counts visual (wrapped) lines. Wide JSON content with few logical lines but many wrapped rows produced max-scroll = 0, disabling scrolling entirely. Fixed with `visual_line_count_str` / `visual_line_count_lines` helpers that divide each line's display width by the area width; the clamped position is also written back to `app.detail_scroll` so `k` after `G` starts from the actual clamped bottom rather than `u16::MAX`.
+- **Terminal resize artifacts** — `terminal.clear()` now called on `AppEvent::Resize` to erase characters outside the new (smaller) render area that ratatui's buffer does not cover.
+
 ## [0.0.4] — 2026-05-23
 
 ### Added

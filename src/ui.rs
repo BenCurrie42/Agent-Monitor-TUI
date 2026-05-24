@@ -17,6 +17,7 @@ use crate::store::Store;
 
 pub fn render(f: &mut Frame, store: &Store, app: &mut AppState) {
     let area = f.area();
+    f.render_widget(Clear, area);
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(5), Constraint::Min(1), Constraint::Length(1)])
@@ -187,6 +188,7 @@ fn render_sidebar(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
     let list = List::new(items)
         .block(block)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    f.render_widget(Clear, area);
     f.render_stateful_widget(list, area, &mut state);
 }
 
@@ -195,6 +197,7 @@ fn render_session_info(f: &mut Frame, store: &Store, app: &AppState, area: Rect)
         .borders(Borders::ALL)
         .title(" Session Info ");
     let inner = block.inner(area);
+    f.render_widget(Clear, area);
     f.render_widget(block, area);
 
     let session = app
@@ -308,6 +311,7 @@ fn render_stream(f: &mut Frame, store: &Store, app: &mut AppState, area: Rect) {
         .title(title);
 
     let inner = block.inner(area);
+    f.render_widget(Clear, area);
     f.render_widget(block, area);
 
     let Some(sid) = &app.selected_session else {
@@ -393,6 +397,7 @@ fn is_error_item(session: &Session, item: &StreamItem) -> bool {
 }
 
 fn render_statusline(f: &mut Frame, app: &AppState, area: Rect) {
+    f.render_widget(Clear, area);
     let hints = match app.mode {
         Mode::Normal | Mode::Help | Mode::DeleteConfirm => {
             let follow = if app.follow { "F" } else { "f" };
@@ -505,7 +510,7 @@ fn render_delete_confirm_modal(f: &mut Frame, store: &Store, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_detail_modal(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
+fn render_detail_modal(f: &mut Frame, store: &Store, app: &mut AppState, area: Rect) {
     let inset = 4;
     let rect = Rect {
         x: area.x + inset / 2,
@@ -533,8 +538,9 @@ fn render_detail_modal(f: &mut Frame, store: &Store, app: &AppState, area: Rect)
     };
     let Some(rec) = session.events.get(item.event_idx) else { return };
 
-    let scroll = app.detail_scroll;
-    match app.detail_view {
+    let detail_view = app.detail_view;
+    let scroll = &mut app.detail_scroll;
+    match detail_view {
         DetailView::Raw => render_detail_raw(f, store, sid, rec, inner, scroll),
         DetailView::Pretty => render_detail_pretty(f, session, &item, rec, inner, scroll),
     }
@@ -559,17 +565,18 @@ fn render_detail_raw(
     session_id: &str,
     rec: &EventRecord,
     area: Rect,
-    scroll: u16,
+    scroll: &mut u16,
 ) {
     let raw_text = store
         .raw_line_for(session_id, rec.file_offset, rec.file_len)
         .unwrap_or_else(|| "(could not re-read source line)".to_string());
     let pretty = pretty_json(&raw_text);
-    let total_lines = pretty.lines().count() as u16;
-    let scroll = clamp_scroll(scroll, total_lines, area.height);
+    let visual_total = visual_line_count_str(&pretty, area.width);
+    let clamped = clamp_scroll(*scroll, visual_total, area.height);
+    *scroll = clamped;
     let p = Paragraph::new(pretty)
         .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+        .scroll((clamped, 0));
     f.render_widget(p, area);
 }
 
@@ -579,20 +586,52 @@ fn render_detail_pretty(
     item: &StreamItem,
     rec: &EventRecord,
     area: Rect,
-    scroll: u16,
+    scroll: &mut u16,
 ) {
     let lines = pretty_lines_for(session, item, rec);
-    let total_lines = lines.len() as u16;
-    let scroll = clamp_scroll(scroll, total_lines, area.height);
+    let visual_total = visual_line_count_lines(&lines, area.width);
+    let clamped = clamp_scroll(*scroll, visual_total, area.height);
+    *scroll = clamped;
     let p = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+        .scroll((clamped, 0));
     f.render_widget(p, area);
 }
 
 fn clamp_scroll(requested: u16, total: u16, height: u16) -> u16 {
     let max = total.saturating_sub(height);
     requested.min(max)
+}
+
+/// Count visual (wrapped) lines for a plain-text string at a given terminal width.
+fn visual_line_count_str(text: &str, width: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    let w = width as usize;
+    text.lines()
+        .map(|line| {
+            let len = line.chars().count();
+            (len.max(1) + w - 1) / w
+        })
+        .sum::<usize>()
+        .min(u16::MAX as usize) as u16
+}
+
+/// Count visual (wrapped) lines for ratatui `Line` objects at a given terminal width.
+fn visual_line_count_lines(lines: &[Line], width: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    let w = width as usize;
+    lines
+        .iter()
+        .map(|line| {
+            let len = line.width();
+            (len.max(1) + w - 1) / w
+        })
+        .sum::<usize>()
+        .min(u16::MAX as usize) as u16
 }
 
 fn pretty_lines_for(
