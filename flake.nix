@@ -11,21 +11,27 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
-        darwinDeps = pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs.darwin.apple_sdk.frameworks; [
-          CoreServices
+        # devShell: libiconv only — CoreServices is provided by the host macOS SDK
+        # implicitly in impure devShells; referencing it explicitly triggers the
+        # removed apple_sdk_11_0 stub in recent nixpkgs.
+        devDarwinDeps = pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconv ];
+
+        # nix build: sandboxed, so the full SDK deps must be explicit.
+        buildDarwinDeps = pkgs.lib.optionals pkgs.stdenv.isDarwin [
           pkgs.libiconv
-        ]);
+          pkgs.darwin.apple_sdk.frameworks.CoreServices
+        ];
       in
       {
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "agent-monitor-tui";
-          version = "0.0.3";
+          version = "0.0.4";
 
           src = self;
 
           cargoLock.lockFile = ./Cargo.lock;
 
-          buildInputs = darwinDeps;
+          buildInputs = buildDarwinDeps;
 
           meta = with pkgs.lib; {
             description = "Passive lazydocker-style TUI for monitoring Claude Code sessions";
@@ -43,7 +49,7 @@
             rust-analyzer
             clippy
             rustfmt
-          ] ++ darwinDeps;
+          ] ++ devDarwinDeps;
 
           # Prevents build.rs xcrun from being needed in the dev shell
           shellHook = ''
