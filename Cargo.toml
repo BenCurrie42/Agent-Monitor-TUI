@@ -1,9 +1,15 @@
 [package]
 name = "agent-monitor-tui"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 description = "AgentMonitorTUI — passive, lazydocker-style TUI for monitoring Claude Code sessions"
 license = "MIT"
+repository = "https://github.com/BenCurrie42/Agent-Monitor-TUI"
+homepage = "https://github.com/BenCurrie42/Agent-Monitor-TUI"
+readme = "README.md"
+keywords = ["tui", "claude", "ai", "monitor", "terminal"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["flake.nix", "flake.lock", ".claude/", "memory/"]
 
 [[bin]]
 name = "agentmonitor"
