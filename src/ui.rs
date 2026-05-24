@@ -768,6 +768,9 @@ fn render_tool_use(
                             "(empty)",
                             Style::default().fg(Color::DarkGray),
                         )));
+                    } else if name == "Read" {
+                        let fp = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+                        extend_highlighted(out, &tr.content, fp);
                     } else {
                         extend_wrapped(out, &tr.content);
                     }
@@ -892,12 +895,16 @@ fn render_tool_command(name: &str, input: &Value) -> Vec<Line<'static>> {
 fn render_tool_result(out: &mut Vec<Line<'static>>, session: &Session, tr: &ToolResult) {
     let mut header = if tr.is_error { "TOOL ERROR".to_string() } else { "TOOL RESULT".to_string() };
     let color = if tr.is_error { Color::Red } else { Color::DarkGray };
+    let mut tool_name: Option<String> = None;
+    let mut file_path: Option<String> = None;
     if let Some(tid) = &tr.tool_use_id {
         if let Some((evt_idx, blk_idx)) = session.tool_use_index.get(tid).cloned() {
             if let Some(rec) = session.events.get(evt_idx) {
                 if let Event::Assistant { blocks, .. } = &rec.event {
-                    if let Some(AssistantBlock::ToolUse { name, .. }) = blocks.get(blk_idx) {
+                    if let Some(AssistantBlock::ToolUse { name, input, .. }) = blocks.get(blk_idx) {
                         header.push_str(&format!(" · {name}"));
+                        tool_name = Some(name.clone());
+                        file_path = input.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string());
                     }
                 }
             }
@@ -910,6 +917,8 @@ fn render_tool_result(out: &mut Vec<Line<'static>>, session: &Session, tr: &Tool
             "(empty)",
             Style::default().fg(Color::DarkGray),
         )));
+    } else if tool_name.as_deref() == Some("Read") {
+        extend_highlighted(out, &tr.content, file_path.as_deref().unwrap_or(""));
     } else {
         extend_wrapped(out, &tr.content);
     }
@@ -918,6 +927,61 @@ fn render_tool_result(out: &mut Vec<Line<'static>>, session: &Session, tr: &Tool
 fn extend_wrapped(out: &mut Vec<Line<'static>>, s: &str) {
     for line in s.lines() {
         out.push(Line::raw(line.to_string()));
+    }
+}
+
+static SYNTAX_SET: std::sync::OnceLock<syntect::parsing::SyntaxSet> = std::sync::OnceLock::new();
+static THEME_SET: std::sync::OnceLock<syntect::highlighting::ThemeSet> = std::sync::OnceLock::new();
+
+fn extend_highlighted(out: &mut Vec<Line<'static>>, content: &str, path: &str) {
+    use syntect::easy::HighlightLines;
+    use syntect::util::LinesWithEndings;
+
+    let ss = SYNTAX_SET.get_or_init(syntect::parsing::SyntaxSet::load_defaults_newlines);
+    let ts = THEME_SET.get_or_init(syntect::highlighting::ThemeSet::load_defaults);
+
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    let syntax = if ext.is_empty() {
+        ss.find_syntax_by_path(path)
+            .unwrap_or_else(|| ss.find_syntax_plain_text())
+    } else {
+        ss.find_syntax_by_extension(ext)
+            .unwrap_or_else(|| ss.find_syntax_plain_text())
+    };
+
+    if syntax.name == "Plain Text" {
+        extend_wrapped(out, content);
+        return;
+    }
+
+    let theme = &ts.themes["base16-ocean.dark"];
+    let mut h = HighlightLines::new(syntax, theme);
+
+    for line in LinesWithEndings::from(content) {
+        match h.highlight_line(line, ss) {
+            Ok(ranges) => {
+                let spans: Vec<Span<'static>> = ranges
+                    .into_iter()
+                    .filter_map(|(style, text)| {
+                        let text = text.trim_end_matches('\n').to_string();
+                        if text.is_empty() {
+                            return None;
+                        }
+                        let c = style.foreground;
+                        Some(Span::styled(
+                            text,
+                            Style::default().fg(Color::Rgb(c.r, c.g, c.b)),
+                        ))
+                    })
+                    .collect();
+                out.push(Line::from(spans));
+            }
+            Err(_) => out.push(Line::raw(line.trim_end_matches('\n').to_string())),
+        }
     }
 }
 
