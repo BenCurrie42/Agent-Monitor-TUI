@@ -77,6 +77,18 @@ pub struct Session {
     pub last_event: Option<DateTime<Utc>>,
     pub last_mtime: Option<DateTime<Utc>>,
     pub process_open: bool,
+    /// True while at least one claude process has this session's project as its
+    /// CWD — even if that claude is driving a *different* session in the same
+    /// project. Lets `is_session_live` distinguish "claude is running here but
+    /// not on me" (closed) from "we have no process info" (timestamp fallback).
+    pub project_has_claude: bool,
+    /// Set to true the first time lsof sees a claude process in this session's project.
+    pub process_ever_open: bool,
+    /// Set when process_open transitions true→false; used for the badge color.
+    pub process_closed_at: Option<DateTime<Utc>>,
+    /// Set to true once we observe an explicit `/exit` (or `/quit`) command in
+    /// the event stream. Definitive evidence the session ended.
+    pub exit_observed: bool,
     pub events: Vec<EventRecord>,
     pub usage_totals: UsageTotals,
     pub byte_offset: u64,
@@ -101,6 +113,10 @@ impl Session {
             last_event: None,
             last_mtime: None,
             process_open: false,
+            project_has_claude: false,
+            process_ever_open: false,
+            process_closed_at: None,
+            exit_observed: false,
             events: Vec::new(),
             usage_totals: UsageTotals::default(),
             byte_offset: 0,

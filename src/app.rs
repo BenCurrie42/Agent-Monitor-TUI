@@ -16,7 +16,9 @@ pub enum AppEvent {
     Key(KeyEvent),
     Resize,
     Fs(FsEvent),
-    OpenFiles(HashSet<PathBuf>),
+    /// One entry per running `claude` process, with duplicates if multiple
+    /// processes share a CWD. Consumed by `Store::apply_open_files`.
+    OpenFiles(Vec<PathBuf>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,23 +40,6 @@ pub enum Mode {
 pub enum DetailView {
     Pretty,
     Raw,
-}
-
-#[derive(Debug, Clone)]
-enum ExpandTarget {
-    Project(String),
-    Closed,
-    SubAgents,
-}
-
-impl ExpandTarget {
-    fn key(&self) -> String {
-        match self {
-            ExpandTarget::Project(s) => s.clone(),
-            ExpandTarget::Closed => CLOSED_KEY.to_string(),
-            ExpandTarget::SubAgents => SUB_AGENT_KEY.to_string(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -209,22 +194,35 @@ impl AppState {
                 self.stream_cursor = 0;
                 self.stream_viewport = 0;
             }
-            KeyCode::Enter => {
-                if self.focus == Focus::Stream && self.selected_session.is_some() {
-                    self.mode = Mode::Detail;
-                    self.detail_view = DetailView::Pretty;
-                    self.detail_scroll = 0;
+            KeyCode::Enter => match self.focus {
+                Focus::Sidebar => {
+                    if self.selected_session.is_some() {
+                        self.focus = Focus::Stream;
+                    }
                 }
-            }
+                Focus::Stream => {
+                    if self.selected_session.is_some() {
+                        self.mode = Mode::Detail;
+                        self.detail_view = DetailView::Pretty;
+                        self.detail_scroll = 0;
+                    }
+                }
+            },
             KeyCode::Char('g') => match self.focus {
-                Focus::Sidebar => self.sidebar_cursor = 0,
+                Focus::Sidebar => {
+                    self.sidebar_cursor = 0;
+                    self.refresh_selection_from_cursor(store);
+                }
                 Focus::Stream => {
                     self.follow = false;
                     self.stream_cursor = 0;
                 }
             },
             KeyCode::Char('G') => match self.focus {
-                Focus::Sidebar => self.sidebar_cursor = usize::MAX, // clamped by UI
+                Focus::Sidebar => {
+                    self.sidebar_cursor = usize::MAX; // clamped below
+                    self.refresh_selection_from_cursor(store);
+                }
                 Focus::Stream => {
                     // G means "jump to bottom" — equivalent to re-enabling follow.
                     self.follow = true;
@@ -232,7 +230,10 @@ impl AppState {
                 }
             },
             KeyCode::Down | KeyCode::Char('j') => match self.focus {
-                Focus::Sidebar => self.sidebar_cursor = self.sidebar_cursor.saturating_add(1),
+                Focus::Sidebar => {
+                    self.sidebar_cursor = self.sidebar_cursor.saturating_add(1);
+                    self.refresh_selection_from_cursor(store);
+                }
                 Focus::Stream => {
                     let bottom = self.bottom_index(store);
                     if self.follow {
@@ -244,7 +245,10 @@ impl AppState {
                 }
             },
             KeyCode::Up | KeyCode::Char('k') => match self.focus {
-                Focus::Sidebar => self.sidebar_cursor = self.sidebar_cursor.saturating_sub(1),
+                Focus::Sidebar => {
+                    self.sidebar_cursor = self.sidebar_cursor.saturating_sub(1);
+                    self.refresh_selection_from_cursor(store);
+                }
                 Focus::Stream => {
                     if self.follow {
                         self.stream_cursor = self.bottom_index(store).saturating_sub(1);
@@ -256,18 +260,13 @@ impl AppState {
             },
             KeyCode::Right | KeyCode::Char('l') => {
                 if self.focus == Focus::Sidebar {
-                    if let Some(target) = self.target_at_cursor(store) {
-                        self.expanded.insert(target.key());
-                    }
+                    self.handle_sidebar_l(store);
                 }
             }
-            KeyCode::Left | KeyCode::Char('h') => {
-                if self.focus == Focus::Sidebar {
-                    if let Some(target) = self.target_at_cursor(store) {
-                        self.expanded.remove(&target.key());
-                    }
-                }
-            }
+            KeyCode::Left | KeyCode::Char('h') => match self.focus {
+                Focus::Sidebar => self.handle_sidebar_h(store),
+                Focus::Stream => self.focus = Focus::Sidebar,
+            },
             KeyCode::Char('n') => self.stream_cursor = self.stream_cursor.saturating_add(1),
             KeyCode::Char('N') => self.stream_cursor = self.stream_cursor.saturating_sub(1),
             KeyCode::Esc => self.filter.clear(),
@@ -361,28 +360,22 @@ impl AppState {
         filtered_count(store, sid, &self.filter, self.show_meta).saturating_sub(1)
     }
 
-    /// What's under the sidebar cursor — for h/l expand/collapse actions.
-    fn target_at_cursor(&self, store: &Store) -> Option<ExpandTarget> {
-        let rows = sidebar_rows(store, &self.expanded);
-        let idx = self.sidebar_cursor.min(rows.len().saturating_sub(1));
-        match rows.get(idx)? {
-            SidebarRow::Project { slug, .. } => Some(ExpandTarget::Project(slug.clone())),
-            SidebarRow::Session { project_slug, .. } => {
-                Some(ExpandTarget::Project(project_slug.clone()))
-            }
-            SidebarRow::ClosedHeader { .. } | SidebarRow::DeleteClosedRow => {
-                Some(ExpandTarget::Closed)
-            }
-            SidebarRow::SubAgentHeader { .. } => Some(ExpandTarget::SubAgents),
-        }
-    }
-
     /// Called by ui::render after laying out rows, so we know what's actually selected.
+    /// Also pins `sidebar_cursor` to the row of `selected_session` if that session
+    /// still exists — so background activity (FS events, lsof ticks) that reorders
+    /// rows doesn't drag the cursor onto a different session.
     pub fn resolve_selection(&mut self, store: &mut Store) {
         let rows = sidebar_rows(store, &self.expanded);
         if rows.is_empty() {
             self.selected_session = None;
             return;
+        }
+        if let Some(sid) = &self.selected_session {
+            if let Some(idx) = rows.iter().position(
+                |r| matches!(r, SidebarRow::Session { session_id, .. } if session_id == sid),
+            ) {
+                self.sidebar_cursor = idx;
+            }
         }
         let max = rows.len().saturating_sub(1);
         if self.sidebar_cursor > max {
@@ -411,6 +404,148 @@ impl AppState {
             | SidebarRow::SubAgentHeader { .. }
             | SidebarRow::DeleteClosedRow => {
                 // Header/action rows: don't change session selection.
+            }
+        }
+    }
+
+    /// `l` in the sidebar: open one level deeper.
+    /// - On a Session row, switch focus to the events stream (same as Enter).
+    /// - On an expandable row that's collapsed, expand it.
+    /// - On an expandable row that's already expanded, descend onto its first child.
+    fn handle_sidebar_l(&mut self, store: &mut Store) {
+        let rows = sidebar_rows(store, &self.expanded);
+        if rows.is_empty() || self.sidebar_cursor >= rows.len() {
+            return;
+        }
+        let idx = self.sidebar_cursor;
+        let max = rows.len() - 1;
+        match &rows[idx] {
+            SidebarRow::Session { .. } => {
+                if self.selected_session.is_some() {
+                    self.focus = Focus::Stream;
+                }
+            }
+            SidebarRow::Project { slug, .. } => {
+                if self.expanded.contains(slug) {
+                    self.sidebar_cursor = (idx + 1).min(max);
+                    self.refresh_selection_from_cursor(store);
+                } else {
+                    self.expanded.insert(slug.clone());
+                }
+            }
+            SidebarRow::ClosedHeader { .. } => {
+                if self.expanded.contains(CLOSED_KEY) {
+                    self.sidebar_cursor = (idx + 1).min(max);
+                    self.refresh_selection_from_cursor(store);
+                } else {
+                    self.expanded.insert(CLOSED_KEY.to_string());
+                }
+            }
+            SidebarRow::SubAgentHeader { .. } => {
+                if self.expanded.contains(SUB_AGENT_KEY) {
+                    self.sidebar_cursor = (idx + 1).min(max);
+                    self.refresh_selection_from_cursor(store);
+                } else {
+                    self.expanded.insert(SUB_AGENT_KEY.to_string());
+                }
+            }
+            SidebarRow::DeleteClosedRow => {}
+        }
+    }
+
+    /// `h` in the sidebar: step back up one level.
+    /// - On a Session row, move the cursor to its parent (Project or SubAgent header).
+    /// - On an expanded Project/header row, collapse it.
+    /// - On a collapsed closed-section Project, jump up to the Closed header.
+    /// - On the DeleteClosedRow, jump up to the Closed header.
+    fn handle_sidebar_h(&mut self, store: &mut Store) {
+        let rows = sidebar_rows(store, &self.expanded);
+        if rows.is_empty() || self.sidebar_cursor >= rows.len() {
+            return;
+        }
+        let idx = self.sidebar_cursor;
+        match &rows[idx] {
+            SidebarRow::Session { project_slug, .. } => {
+                let target_slug = project_slug.clone();
+                let parent = (0..idx).rev().find(|i| {
+                    matches!(&rows[*i], SidebarRow::Project { slug, .. } if slug == &target_slug)
+                        || matches!(&rows[*i], SidebarRow::SubAgentHeader { .. })
+                });
+                if let Some(p) = parent {
+                    self.sidebar_cursor = p;
+                    self.refresh_selection_from_cursor(store);
+                }
+            }
+            SidebarRow::Project { slug, closed } => {
+                if self.expanded.contains(slug) {
+                    self.expanded.remove(slug);
+                } else if *closed {
+                    let parent = (0..idx)
+                        .rev()
+                        .find(|i| matches!(&rows[*i], SidebarRow::ClosedHeader { .. }));
+                    if let Some(p) = parent {
+                        self.sidebar_cursor = p;
+                        self.refresh_selection_from_cursor(store);
+                    }
+                }
+            }
+            SidebarRow::ClosedHeader { .. } => {
+                self.expanded.remove(CLOSED_KEY);
+            }
+            SidebarRow::SubAgentHeader { .. } => {
+                self.expanded.remove(SUB_AGENT_KEY);
+            }
+            SidebarRow::DeleteClosedRow => {
+                let parent = (0..idx)
+                    .rev()
+                    .find(|i| matches!(&rows[*i], SidebarRow::ClosedHeader { .. }));
+                if let Some(p) = parent {
+                    self.sidebar_cursor = p;
+                    self.refresh_selection_from_cursor(store);
+                }
+            }
+        }
+    }
+
+    /// After explicit cursor movement (j/k/g/G), sync `selected_session` and
+    /// `selected_project` to whatever row the cursor now points at. Without
+    /// this, `resolve_selection`'s pin would snap the cursor back to the old
+    /// selection on the next render.
+    fn refresh_selection_from_cursor(&mut self, store: &mut Store) {
+        let rows = sidebar_rows(store, &self.expanded);
+        if rows.is_empty() {
+            self.selected_session = None;
+            self.selected_project = None;
+            return;
+        }
+        let max = rows.len() - 1;
+        if self.sidebar_cursor > max {
+            self.sidebar_cursor = max;
+        }
+        match &rows[self.sidebar_cursor] {
+            SidebarRow::Session {
+                project_slug,
+                session_id,
+                ..
+            } => {
+                self.selected_project = Some(project_slug.clone());
+                let changed = self.selected_session.as_deref() != Some(session_id.as_str());
+                self.selected_session = Some(session_id.clone());
+                if changed {
+                    let _ = store.ensure_loaded(session_id);
+                    self.stream_cursor = 0;
+                    self.stream_viewport = 0;
+                }
+            }
+            SidebarRow::Project { slug, .. } => {
+                self.selected_project = Some(slug.clone());
+                self.selected_session = None;
+            }
+            SidebarRow::ClosedHeader { .. }
+            | SidebarRow::SubAgentHeader { .. }
+            | SidebarRow::DeleteClosedRow => {
+                // Headers don't carry a selection; clear so pin doesn't fight the user.
+                self.selected_session = None;
             }
         }
     }

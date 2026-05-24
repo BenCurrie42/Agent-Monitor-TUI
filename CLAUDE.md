@@ -19,7 +19,7 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 - **`AppState`** (`app.rs`) — all mutable UI state: focus, mode, follow, cursors, viewport, filter, expanded set
 - **`Store`** (`store.rs`) — `BTreeMap<String, Project>` + `HashMap<String, Session>`
 - **`EventRecord`** (`data.rs`) — parsed JSONL line: `Event` enum + timestamp, model, sidechain flag, `session_kind`, byte offset
-- **`Session`** (`data.rs`) — includes `is_background` (set when `sessionKind == "bg"`) and `process_open` (set via lsof polling)
+- **`Session`** (`data.rs`) — includes `is_background` (set when `sessionKind == "bg"`), `process_open` (set via lsof polling), `project_has_claude` (any claude CWD matches this project), `process_ever_open` (latches true once seen), `process_closed_at` (timestamp of last close), `exit_observed` (set on `/exit`/`/quit` command)
 - **`FsEvent`** (`store.rs`) — `Created | Modified | Removed(PathBuf)` dispatched from the watcher thread
 
 ## Data flow
@@ -32,9 +32,9 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
         ├─[watch]   WatcherHandle → FsEvent → Store::apply_fs_event → tail_load_session
         │                                               │
         │                                     AppEvent::Fs → main loop → render
-        └─[lsof]    background thread (every 5s) → claude_open_files()
+        └─[lsof]    background thread (every 1s) → claude_open_files() [returns process CWDs]
                                                         │
-                                              AppEvent::OpenFiles → Store::apply_open_files → Session.process_open
+                                              AppEvent::OpenFiles → Store::apply_open_files → Session.process_open / project_has_claude
 ```
 
 ## Loading strategy
@@ -45,7 +45,15 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 
 ## Liveness
 
-A session is "live" if its JSONL file is currently held open by a `claude` process (`process_open: true`, checked via `lsof` every 5 s), **or** if its last event timestamp is within `LIVE_THRESHOLD_SECS` (300 s). The sidebar has three sections: live sessions, sub-agents (background sessions with no user-visible title or first user line), and a collapsible closed section. The session-info liveness badge uses green (<30 s or process open) / yellow (<5 min) / gray.
+`is_session_live` uses a five-tier cascade (checked via `lsof` every 1 s):
+
+1. `exit_observed` → dead (user typed `/exit` or `/quit`)
+2. `process_open` → live (a claude process CWD maps to this session)
+3. `project_has_claude` → dead (claude is running in this project but driving a different session)
+4. `process_ever_open` → dead (process was seen before but is gone now)
+5. Timestamp fallback — live if `last_event`/`last_mtime` < `LIVE_THRESHOLD_SECS` (300 s)
+
+`claude_open_files()` queries process CWDs (`lsof -a -c claude -d cwd`). For a project with N running claude processes, the N most-recently-active sessions are marked `process_open = true`. The sidebar has three sections: live sessions, sub-agents (background sessions with no user-visible title or first user line), and a collapsible closed section. The session-info liveness badge uses green (process open and active <30 s) / yellow (process open but quiet) / gray.
 
 ## CLI flags
 
@@ -59,4 +67,4 @@ A session is "live" if its JSONL file is currently held open by a `claude` proce
 
 ## Version
 
-0.0.2 — 2026-05-23
+0.0.3 — 2026-05-23

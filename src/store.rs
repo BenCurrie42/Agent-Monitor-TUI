@@ -10,13 +10,32 @@ use crate::data::{
     parse_line, AssistantBlock, Event, EventRecord, Project, Session, UserContent,
 };
 
-/// Seconds since last activity within which a session is considered "live".
+/// Fallback "live" window for sessions we never observed a claude process for.
+/// Only used when neither `process_open` nor `process_ever_open` apply.
 pub const LIVE_THRESHOLD_SECS: i64 = 300;
 
 pub fn is_session_live(s: &Session) -> bool {
+    // 1. Definitive: user typed `/exit` (or `/quit`).
+    if s.exit_observed {
+        return false;
+    }
+    // 2. A claude process is here AND we believe it's driving this specific
+    // session (i.e., this session is among the N most-recently-modified in a
+    // project with N claude processes).
     if s.process_open {
         return true;
     }
+    // 3. Claude is running in this project but is driving a different session.
+    // Don't let the timestamp fallback pretend this stale sibling is live just
+    // because its file mtime is recent.
+    if s.project_has_claude {
+        return false;
+    }
+    // 4. We observed a process here before, and it's gone now.
+    if s.process_ever_open {
+        return false;
+    }
+    // 5. No process info for this project — fall back to timestamp heuristic.
     let Some(t) = s.last_event.or(s.last_mtime) else {
         return false;
     };
@@ -295,10 +314,53 @@ impl Store {
         }
     }
 
-    /// Update `process_open` for all sessions based on the given set of open file paths.
-    pub fn apply_open_files(&mut self, open_paths: &std::collections::HashSet<std::path::PathBuf>) {
-        for s in self.sessions.values_mut() {
-            s.process_open = open_paths.contains(&s.file);
+    /// Update `process_open` for all sessions.
+    ///
+    /// `active_dirs` is the list of working-directory paths of running claude
+    /// processes — one entry per process, with duplicates if multiple claude
+    /// processes share a CWD. `claude` does not hold its JSONL file open, so
+    /// lsof can't tell us *which* session in a multi-session project is the
+    /// one being driven. Instead, for each project with N running claude
+    /// processes, we mark the N most-recently-active sessions as
+    /// `process_open = true`. Sessions whose JSONL hasn't been touched
+    /// recently won't be misclassified as live just because some unrelated
+    /// claude is running in the same directory.
+    pub fn apply_open_files(&mut self, active_dirs: &[std::path::PathBuf]) {
+        let now = Utc::now();
+
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for p in active_dirs {
+            if let Some(s) = p.to_str() {
+                *counts.entry(cwd_to_slug(s)).or_insert(0) += 1;
+            }
+        }
+
+        let mut active_sessions: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for (slug, n) in &counts {
+            let mut ids: Vec<(String, Option<DateTime<Utc>>)> = self
+                .sessions
+                .iter()
+                .filter(|(_, s)| s.project_slug == *slug)
+                .map(|(id, s)| (id.clone(), s.last_event.or(s.last_mtime)))
+                .collect();
+            ids.sort_by(|a, b| b.1.cmp(&a.1));
+            for (id, _) in ids.into_iter().take(*n) {
+                active_sessions.insert(id);
+            }
+        }
+
+        for (id, s) in self.sessions.iter_mut() {
+            let was_open = s.process_open;
+            let now_open = active_sessions.contains(id);
+            s.process_open = now_open;
+            s.project_has_claude = counts.contains_key(&s.project_slug);
+            if now_open {
+                s.process_ever_open = true;
+                s.process_closed_at = None;
+            } else if was_open {
+                s.process_closed_at = Some(now);
+            }
         }
     }
 
@@ -311,6 +373,23 @@ impl Store {
         f.read_exact(&mut buf).ok()?;
         String::from_utf8(buf).ok()
     }
+}
+
+/// True if a user-text event represents an `/exit` or `/quit` slash command.
+/// Claude Code wraps slash commands as `<command-name>/exit</command-name>` in
+/// the user-content stream, so we detect that wrapper directly.
+fn is_exit_command(text: &str) -> bool {
+    let t = text.trim();
+    t == "<command-name>/exit</command-name>" || t == "<command-name>/quit</command-name>"
+}
+
+/// Re-encode an absolute path as the slug Claude Code would use for it:
+/// replace every `/` and `.` with `-`. This is the same encoding Claude Code
+/// applies when naming the project directory under `~/.claude/projects/`.
+fn cwd_to_slug(path: &str) -> String {
+    path.chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -563,6 +642,11 @@ fn apply_event_side_effects(session: &mut Session, rec: &EventRecord) {
     }
     if rec.session_kind.as_deref() == Some("bg") {
         session.is_background = true;
+    }
+    if let Event::User(UserContent::Text(s)) = &rec.event {
+        if is_exit_command(s) {
+            session.exit_observed = true;
+        }
     }
     match &rec.event {
         Event::AiTitle(t) if !t.trim().is_empty() => session.title = Some(t.clone()),

@@ -4,7 +4,6 @@ mod store;
 mod ui;
 mod watcher;
 
-use std::collections::HashSet;
 use std::io;
 use std::panic;
 use std::path::PathBuf;
@@ -121,7 +120,7 @@ fn run(
     {
         let tx = tx.clone();
         std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(Duration::from_secs(1));
             if tx.send(AppEvent::OpenFiles(claude_open_files())).is_err() {
                 return;
             }
@@ -319,22 +318,24 @@ fn resolve_session_id(store: &Store, query: &str) -> Result<String> {
     }
 }
 
-/// Returns the set of JSONL file paths currently held open by any `claude` process.
-/// Uses `lsof -F n -c claude`; returns an empty set if lsof is unavailable or fails.
-fn claude_open_files() -> HashSet<PathBuf> {
+/// Returns one entry per running `claude` process — each is the process's CWD.
+/// Duplicates are preserved so callers can count how many claude processes
+/// share a project. The `-a` flag is critical: without it, lsof ORs the
+/// `-c` and `-d` filters and returns every process on the system.
+fn claude_open_files() -> Vec<PathBuf> {
     let Ok(out) = std::process::Command::new("lsof")
-        .args(["-F", "n", "-c", "claude"])
+        .args(["-a", "-c", "claude", "-d", "cwd", "-F", "n"])
         .output()
     else {
-        return HashSet::new();
+        return Vec::new();
     };
     let Ok(stdout) = std::str::from_utf8(&out.stdout) else {
-        return HashSet::new();
+        return Vec::new();
     };
     stdout
         .lines()
         .filter_map(|l| l.strip_prefix('n'))
-        .filter(|p| p.ends_with(".jsonl"))
+        .filter(|p| !p.is_empty() && *p != "/")
         .map(PathBuf::from)
         .collect()
 }

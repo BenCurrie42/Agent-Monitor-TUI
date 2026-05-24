@@ -445,12 +445,12 @@ fn render_help_modal(f: &mut Frame, area: Rect) {
     let lines = vec![
         Line::from(Span::styled("Navigation", head)),
         Line::from(vec![Span::styled("  j / k / ↑ / ↓  ", dim), Span::raw("Move up / down")]),
-        Line::from(vec![Span::styled("  h / l / ← / →  ", dim), Span::raw("Collapse / expand")]),
+        Line::from(vec![Span::styled("  h / l / ← / →  ", dim), Span::raw("Step out / in (l on a session = focus events)")]),
         Line::from(vec![Span::styled("  Tab             ", dim), Span::raw("Switch focus sidebar ↔ events")]),
         Line::from(vec![Span::styled("  g / G           ", dim), Span::raw("Top / bottom")]),
         Line::from(Span::raw("")),
         Line::from(Span::styled("Actions", head)),
-        Line::from(vec![Span::styled("  Enter           ", dim), Span::raw("Open event detail")]),
+        Line::from(vec![Span::styled("  Enter           ", dim), Span::raw("Sidebar: focus events · Events: open detail")]),
         Line::from(vec![Span::styled("  /               ", dim), Span::raw("Filter events")]),
         Line::from(vec![Span::styled("  f               ", dim), Span::raw("Toggle follow (auto-scroll)")]),
         Line::from(vec![Span::styled("  v               ", dim), Span::raw("Toggle meta events")]),
@@ -1081,19 +1081,35 @@ enum Liveness {
 }
 
 fn liveness(s: &Session) -> Liveness {
-    if s.process_open {
-        return Liveness::Live;
+    if s.exit_observed {
+        return Liveness::Cold;
     }
-    let t = s.last_event.or(s.last_mtime);
-    let Some(t) = t else { return Liveness::Cold };
-    let now = Utc::now();
-    let age = now.signed_duration_since(t).num_seconds();
-    if age < 30 {
-        Liveness::Live
-    } else if age < 300 {
-        Liveness::Recent
-    } else {
+    if s.process_open {
+        // Process is in the project. Green if file is being actively written to,
+        // yellow if quiet but still alive (e.g. user reading a response).
+        let age = s
+            .last_event
+            .or(s.last_mtime)
+            .map(|t| Utc::now().signed_duration_since(t).num_seconds())
+            .unwrap_or(i64::MAX);
+        if age < 30 {
+            Liveness::Live
+        } else {
+            Liveness::Recent
+        }
+    } else if s.process_ever_open {
         Liveness::Cold
+    } else {
+        let t = s.last_event.or(s.last_mtime);
+        let Some(t) = t else { return Liveness::Cold };
+        let age = Utc::now().signed_duration_since(t).num_seconds();
+        if age < 30 {
+            Liveness::Live
+        } else if age < 300 {
+            Liveness::Recent
+        } else {
+            Liveness::Cold
+        }
     }
 }
 

@@ -4,6 +4,34 @@ All notable changes are documented here.
 
 ---
 
+## [0.0.3] — 2026-05-23
+
+### Added
+- **`Session.project_has_claude`** — true while any `claude` process has this session's project as its CWD, even if that process is driving a different session; prevents stale siblings from being misclassified as live
+- **`Session.process_ever_open`** — latches true the first time lsof sees a claude process for this session; transitions the session to Cold once the process exits
+- **`Session.process_closed_at`** — records when `process_open` transitions `true → false`
+- **`Session.exit_observed`** — set when an explicit `/exit` or `/quit` slash command is parsed from the event stream; immediately marks the session Cold regardless of process or timestamp state
+- **`cwd_to_slug`** helper (`store.rs`) — re-encodes absolute paths as the project-slug format Claude Code uses for `~/.claude/projects/` directory names
+- **`is_exit_command`** helper (`store.rs`) — detects `/exit` and `/quit` commands in the `<command-name>…</command-name>` wrapper format
+
+### Changed
+- **lsof strategy** — `claude_open_files()` now queries process CWDs (`lsof -a -c claude -d cwd`) instead of open file paths; returns `Vec<PathBuf>` (one entry per running process) rather than `HashSet`; the `-a` flag ANDs the `-c`/`-d` filters to avoid returning every process on the system
+- **lsof polling interval** — reduced from 5 s to 1 s for faster liveness response
+- **`apply_open_files`** — rewritten to accept CWD paths; counts running claude processes per project slug, then marks the N most-recently-active sessions in a project as `process_open = true` (N = number of claude processes in that project)
+- **`is_session_live` logic** — five-tier cascade: `exit_observed` (definitive dead) → `process_open` (definitive live) → `project_has_claude` (live process, different session → dead) → `process_ever_open` (process exited → dead) → timestamp fallback (no process info)
+- **`liveness()` UI helper** — `exit_observed → Cold`; `process_open` shows Live (<30 s activity) or Recent (quiet but alive); `process_ever_open → Cold`; falls through to timestamp heuristic only if no process was ever seen
+- **Sidebar `l` key** — redesigned as tree-style "step in": on a Session row, shifts focus to the events stream; on a collapsed Project/header, expands it; on an already-expanded Project/header, moves cursor onto its first child
+- **Sidebar `h` key** — redesigned as tree-style "step out": on a Session row, moves cursor to its parent header; on an expanded Project/header, collapses it; `h` in the events panel moves focus back to the sidebar
+- **`Enter` key** — context-aware: in the Sidebar shifts focus to the events stream; in the events stream opens the detail modal
+- **`g`/`G`/`j`/`k` sidebar navigation** — calls `refresh_selection_from_cursor` immediately so selection tracks the cursor without waiting for the next render
+- **`resolve_selection`** — pins `sidebar_cursor` to the row of the currently-selected session, preventing background FS events and lsof ticks from dragging the cursor off the user's selection
+- **Help overlay** — updated `h`/`l` description to "Step out / in (l on a session = focus events)" and `Enter` to "Sidebar: focus events · Events: open detail"
+- **`AppEvent::OpenFiles`** — payload changed from `HashSet<PathBuf>` to `Vec<PathBuf>` to carry one entry per process with duplicates
+
+### Removed
+- **`ExpandTarget` enum** (`app.rs`) — replaced by `handle_sidebar_l` / `handle_sidebar_h` methods with richer per-row semantics
+- **`target_at_cursor`** method — replaced by the same refactor
+
 ## [0.0.2] — 2026-05-23
 
 ### Added
