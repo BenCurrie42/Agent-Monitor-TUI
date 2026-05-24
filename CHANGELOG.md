@@ -4,6 +4,18 @@ All notable changes are documented here.
 
 ---
 
+## [0.0.4] — 2026-05-23
+
+### Added
+- **Nix flake** (`flake.nix`) — `nix develop` drops into a dev shell with Rust toolchain and macOS SDK frameworks (CoreServices, libiconv); `nix build` produces the release binary; supports aarch64-darwin, x86_64-darwin, and Linux
+- **GitHub Actions release workflow** (`.github/workflows/release.yml`) — builds pre-compiled binaries on tag push (`v*`) for aarch64-apple-darwin, x86_64-apple-darwin, and x86_64-unknown-linux-musl; uploads them to a GitHub Release with auto-generated notes
+- **crates.io metadata** — `Cargo.toml` gains `repository`, `homepage`, `readme`, `keywords`, `categories`, and `exclude` fields; enables `cargo publish`
+
+### New files
+- `flake.nix` — Nix flake with `devShells.default` (dev shell) and `packages.default` (release binary build)
+- `flake.lock` — pinned nixpkgs/flake-utils inputs
+- `.github/workflows/release.yml` — CI release pipeline: build + upload pre-compiled binaries to GitHub Release
+
 ## [0.0.3] — 2026-05-23
 
 ### Added

@@ -8,14 +8,22 @@ Reads the JSONL files Claude writes to `~/.claude/projects`, tails them in real 
 
 ## Install
 
+**From crates.io** (requires Rust):
+```bash
+cargo install agent-monitor-tui
+```
+
+**Pre-built binary** (no Rust required):
+Download the binary for your platform from [GitHub Releases](https://github.com/BenCurrie42/Agent-Monitor-TUI/releases), `chmod +x`, and move it to somewhere on your `PATH`.
+
+**From source:**
 ```bash
 cargo install --path .
 ```
 
-Or just run it:
-
+**Nix dev shell:**
 ```bash
-cargo run --release
+nix develop
 ```
 
 ## Usage
