@@ -486,15 +486,31 @@ fn metadata_scan_session(session: &mut Session) {
                 if let Some(ts) = rec.timestamp {
                     session.last_event = Some(ts);
                 }
+                if let Event::Assistant { usage: Some(u), .. } = &rec.event {
+                    let ctx = u.input_tokens.unwrap_or(0)
+                        + u.cache_creation_input_tokens.unwrap_or(0)
+                        + u.cache_read_input_tokens.unwrap_or(0);
+                    if ctx > 0 {
+                        session.last_input_tokens = Some(ctx);
+                    }
+                }
             }
         }
     } else {
-        // Whole file is in head; pick last_event from head pass.
+        // Whole file is in head; pick last_event and last_input_tokens from head pass.
         let mut last_ts: Option<DateTime<Utc>> = None;
         for line in head_str.lines() {
             if let Some(rec) = parse_line(line, 0) {
                 if let Some(ts) = rec.timestamp {
                     last_ts = Some(ts);
+                }
+                if let Event::Assistant { usage: Some(u), .. } = &rec.event {
+                    let ctx = u.input_tokens.unwrap_or(0)
+                        + u.cache_creation_input_tokens.unwrap_or(0)
+                        + u.cache_read_input_tokens.unwrap_or(0);
+                    if ctx > 0 {
+                        session.last_input_tokens = Some(ctx);
+                    }
                 }
             }
         }
@@ -570,6 +586,7 @@ fn full_load_session(session: &mut Session) -> Result<()> {
     let mut events = Vec::new();
     let mut offset: u64 = 0;
     session.usage_totals = Default::default();
+    session.last_input_tokens = None;
     session.tool_use_index.clear();
     session.tool_result_index.clear();
     for line in reader.lines() {
@@ -666,6 +683,13 @@ fn apply_event_side_effects(session: &mut Session, rec: &EventRecord) {
                     || u.cache_read_input_tokens.unwrap_or(0) > 0;
                 if any_nonzero {
                     session.usage_totals.add(u, rec.model.as_deref());
+                    // Full context size = all input-side tokens (most are cache hits/writes).
+                    let ctx = u.input_tokens.unwrap_or(0)
+                        + u.cache_creation_input_tokens.unwrap_or(0)
+                        + u.cache_read_input_tokens.unwrap_or(0);
+                    if ctx > 0 {
+                        session.last_input_tokens = Some(ctx);
+                    }
                 }
             }
         }

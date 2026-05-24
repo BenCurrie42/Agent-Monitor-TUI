@@ -11,7 +11,8 @@ use crate::app::{
 };
 use crate::store::is_session_live;
 use crate::data::{
-    decode_slug, short_id, AssistantBlock, Event, EventRecord, Session, ToolResult, UserContent,
+    decode_slug, model_context_window, short_id, AssistantBlock, Event, EventRecord, Session,
+    ToolResult, UserContent,
 };
 use crate::store::Store;
 
@@ -20,7 +21,7 @@ pub fn render(f: &mut Frame, store: &Store, app: &mut AppState) {
     f.render_widget(Clear, area);
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(1), Constraint::Length(1)])
+        .constraints([Constraint::Length(6), Constraint::Min(1), Constraint::Length(1)])
         .split(area);
     let bottom = Layout::default()
         .direction(Direction::Horizontal)
@@ -288,7 +289,43 @@ fn session_info_lines(s: &Session) -> Vec<Line<'_>> {
         Span::raw(started),
     ]);
 
-    vec![line1, line2, line3]
+    // Line 4: context window pressure gauge
+    let ctx_line = if let Some(last_input) = s.last_input_tokens {
+        let model_name = s
+            .events
+            .iter()
+            .rev()
+            .find_map(|r| r.model.as_deref())
+            .unwrap_or("");
+        let limit = model_context_window(model_name);
+        let ratio = (last_input as f64 / limit as f64).min(1.0);
+        let pct = (ratio * 100.0) as u64;
+        let filled = (ratio * 20.0).round() as usize;
+        let bar = format!("{}{}", "█".repeat(filled), "░".repeat(20 - filled));
+        let bar_color = if ratio < 0.5 {
+            Color::Green
+        } else if ratio < 0.75 {
+            Color::Yellow
+        } else {
+            Color::Red
+        };
+        Line::from(vec![
+            Span::styled("CTX ", label),
+            Span::styled(format!("[{bar}]"), Style::default().fg(bar_color)),
+            Span::raw(format!(
+                " {pct}% ({} / {})",
+                format_count(last_input),
+                format_count(limit)
+            )),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("CTX ", label),
+            Span::styled("—", Style::default().fg(Color::DarkGray)),
+        ])
+    };
+
+    vec![line1, line2, line3, ctx_line]
 }
 
 fn model_short_name(model: &str) -> String {

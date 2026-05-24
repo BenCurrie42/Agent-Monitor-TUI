@@ -8,7 +8,7 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 |---|---|
 | `src/main.rs` | Entry point: CLI args (`clap`), terminal setup/teardown, `crossbeam-channel` event loop |
 | `src/app.rs` | `AppState`, keyboard handling, `sidebar_rows`, `stream_items`, filter matching |
-| `src/data.rs` | Data model, JSONL `parse_line`, `UsageTotals`, `ModelPrice`, slug decoding |
+| `src/data.rs` | Data model, JSONL `parse_line`, `UsageTotals`, `ModelPrice`, `model_context_window`, slug decoding |
 | `src/store.rs` | `Store`: project/session maps, initial scan, lazy full load, incremental tail load, FS event handling |
 | `src/ui.rs` | All `ratatui` rendering: sidebar, header, event stream, detail modal, filter overlay, statusline |
 | `src/watcher.rs` | `notify-debouncer-mini` watcher; maps FS events to `FsEvent` enum |
@@ -19,7 +19,7 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 - **`AppState`** (`app.rs`) — all mutable UI state: focus, mode, follow, cursors, viewport, filter, expanded set
 - **`Store`** (`store.rs`) — `BTreeMap<String, Project>` + `HashMap<String, Session>`
 - **`EventRecord`** (`data.rs`) — parsed JSONL line: `Event` enum + timestamp, model, sidechain flag, `session_kind`, byte offset
-- **`Session`** (`data.rs`) — includes `is_background` (set when `sessionKind == "bg"`), `process_open` (set via lsof polling), `project_has_claude` (any claude CWD matches this project), `process_ever_open` (latches true once seen), `process_closed_at` (timestamp of last close), `exit_observed` (set on `/exit`/`/quit` command)
+- **`Session`** (`data.rs`) — includes `is_background` (set when `sessionKind == "bg"`), `process_open` (set via lsof polling), `project_has_claude` (any claude CWD matches this project), `process_ever_open` (latches true once seen), `process_closed_at` (timestamp of last close), `exit_observed` (set on `/exit`/`/quit` command), `last_input_tokens` (sum of all input-side tokens from most recent assistant turn — represents current context size)
 - **`FsEvent`** (`store.rs`) — `Created | Modified | Removed(PathBuf)` dispatched from the watcher thread
 
 ## Data flow
@@ -39,8 +39,8 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 
 ## Loading strategy
 
-- **Metadata scan** — reads first 64KB (title, first user line, started) + last 16KB (last_event timestamp) without a full parse. Runs for all sessions at startup.
-- **Full load** — parses entire file; populates `events`, `usage_totals`, `tool_use_index`, `tool_result_index`. Triggered on first session select.
+- **Metadata scan** — reads first 64KB (title, first user line, started) + last 16KB (last_event timestamp, last_input_tokens) without a full parse. Runs for all sessions at startup.
+- **Full load** — parses entire file; populates `events`, `usage_totals`, `last_input_tokens`, `tool_use_index`, `tool_result_index`. Triggered on first session select.
 - **Tail load** — seeks to `byte_offset`, reads only newly appended bytes. Triggered on FS modify events for already-loaded sessions.
 
 ## Liveness
@@ -67,4 +67,4 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 
 ## Version
 
-0.0.5 — 2026-05-23
+0.0.6 — 2026-05-24

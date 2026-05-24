@@ -99,6 +99,8 @@ pub struct Session {
     pub tool_use_index: HashMap<String, (usize, usize)>,
     /// tool_use id → (event_idx, result_idx) for the tool_result that replied to it.
     pub tool_result_index: HashMap<String, (usize, usize)>,
+    /// input_tokens from the most recent assistant turn — represents current context size.
+    pub last_input_tokens: Option<u64>,
 }
 
 impl Session {
@@ -125,6 +127,7 @@ impl Session {
             is_background: false,
             tool_use_index: HashMap::new(),
             tool_result_index: HashMap::new(),
+            last_input_tokens: None,
         }
     }
 
@@ -194,10 +197,10 @@ pub fn model_price(model: &str) -> Option<ModelPrice> {
     let m = model.to_ascii_lowercase();
     if m.contains("opus") {
         Some(ModelPrice {
-            input: 15.00,
-            output: 75.00,
-            cache_write: 18.75,
-            cache_read: 1.50,
+            input: 5.00,
+            output: 25.00,
+            cache_write: 6.25,
+            cache_read: 0.50,
         })
     } else if m.contains("sonnet") {
         Some(ModelPrice {
@@ -215,6 +218,18 @@ pub fn model_price(model: &str) -> Option<ModelPrice> {
         })
     } else {
         None
+    }
+}
+
+/// Input token limit for a given model. Opus 4.6+/Sonnet 4.6+ have 1M; everything else 200k.
+pub fn model_context_window(model: &str) -> u64 {
+    let m = model.to_ascii_lowercase();
+    if (m.contains("opus") && (m.contains("4-6") || m.contains("4-7")))
+        || (m.contains("sonnet") && m.contains("4-6"))
+    {
+        1_000_000
+    } else {
+        200_000
     }
 }
 

@@ -4,6 +4,16 @@ All notable changes are documented here.
 
 ---
 
+## [0.0.6] — 2026-05-24
+
+### Added
+- **Context window pressure gauge** — fourth line in the session info header shows `CTX [████████░░░░░░░░░░░░] 38% (76k / 200k)`. Calculated as the full context sent in the most recent assistant turn (`input_tokens + cache_creation_input_tokens + cache_read_input_tokens`). Color shifts green → yellow → red at 50%/75% thresholds. Populated at startup from the metadata scan tail pass — no session select required. Model limits via new `model_context_window()` in `data.rs`: 1M for Opus 4.6/4.7 and Sonnet 4.6, 200k for all others.
+- **Syntax highlighting for Read tool output** — file content in the event stream (both inline OUTPUT blocks and standalone tool-result entries) is syntax-highlighted by file extension using `syntect` v5 with the `base16-ocean.dark` theme. Lazy-initialized once via `OnceLock`. Falls back to plain text for unrecognized extensions.
+
+### Changed
+- **Opus pricing** in `model_price()` updated to current rates: $5/$25 per MTok input/output (was $15/$75).
+- **Session info panel** height extended from 5 → 6 lines to accommodate the CTX gauge row.
+
 ## [0.0.5] — 2026-05-23
 
 ### Fixed
