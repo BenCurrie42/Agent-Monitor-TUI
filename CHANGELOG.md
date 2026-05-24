@@ -4,6 +4,29 @@ All notable changes are documented here.
 
 ---
 
+## [0.0.2] — 2026-05-23
+
+### Added
+- **Sub-agents section** — collapsible "Sub-agents" sidebar section groups background sessions detected via `sessionKind: "bg"`; excluded from live/closed sections
+- **Delete closed sessions** — `D` key (cursor on Closed header or `[D] Delete all closed` row) opens a confirmation modal; confirmed deletion removes JSONL files from disk and evicts sessions from the store
+- **Help modal** — `?` opens a keyboard-reference overlay listing all keybindings; `?` / `Esc` / `q` to close
+- **Process-open liveness** — `lsof -F n -c claude` polled every 5 s in a background thread; sessions whose JSONL file is held open by a `claude` process are marked `process_open: true` and treated as live regardless of timestamp
+- **`sessionKind` field** — parsed from JSONL `RawRecord`; propagated to `EventRecord.session_kind` and used to set `Session.is_background` during metadata and full-load scans
+- **`Session.process_open`** and **`Session.is_background`** — new boolean fields; checked in `is_session_live` and the `liveness` UI helper
+- **`OpenFiles` app event** — `AppEvent::OpenFiles(HashSet<PathBuf>)` dispatched from the lsof-polling thread; handled by `Store::apply_open_files` in the main event loop
+- **`Store::delete_closed_sessions`** — removes all non-live sessions from disk and in-memory store; returns count deleted
+- **`Store::apply_open_files`** — updates `process_open` for all sessions from a given path set
+
+### Changed
+- **Layout** — reorganized to top-bar (session info, 5 lines) + bottom split (sidebar 30% / events 70%); previously sidebar-left + header-top + stream-right
+- **Session info panel** — redesigned from a single usage line: line 1 = title + liveness badge + last-active time; line 2 = cost / tokens / model (with `claude-` prefix stripped); line 3 = project / session ID / started time
+- **Event stream labels** — replaced emoji prefix + colon format with fixed-width 6-char text labels (`asst  `, `tool  `, `think `, `user  `, `sys   `, `title `, `↩     `)
+- **`ToolResults` events** — now hidden by default (treated as meta) instead of always visible
+- **Statusline** — simplified to a single compact hint line; removed MODE badge and brand label
+- **Sidebar title** — "Live sessions" → "Sessions"
+- **Closed header** — "Closed sessions" → "Closed"; count format compacted from `(N in M project(s))` to `(N in M)`
+- **Stream cursor** — clamped to the bottom-of-stream index when navigating down
+
 ## [0.0.1] — 2026-05-23
 
 ### Added

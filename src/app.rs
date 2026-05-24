@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -8,12 +9,14 @@ use crate::store::{is_session_live, FsEvent, Store};
 /// Sentinel "slug" used as the key for the Closed sessions dropdown in
 /// `AppState.expanded`. Not a real project slug.
 pub const CLOSED_KEY: &str = "__closed__";
+pub const SUB_AGENT_KEY: &str = "__subagents__";
 
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     Key(KeyEvent),
     Resize,
     Fs(FsEvent),
+    OpenFiles(HashSet<PathBuf>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +30,8 @@ pub enum Mode {
     Normal,
     Filter,
     Detail,
+    Help,
+    DeleteConfirm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +44,7 @@ pub enum DetailView {
 enum ExpandTarget {
     Project(String),
     Closed,
+    SubAgents,
 }
 
 impl ExpandTarget {
@@ -46,6 +52,7 @@ impl ExpandTarget {
         match self {
             ExpandTarget::Project(s) => s.clone(),
             ExpandTarget::Closed => CLOSED_KEY.to_string(),
+            ExpandTarget::SubAgents => SUB_AGENT_KEY.to_string(),
         }
     }
 }
@@ -162,6 +169,8 @@ impl AppState {
         match self.mode {
             Mode::Filter => self.handle_key_filter(k),
             Mode::Detail => self.handle_key_detail(k),
+            Mode::Help => self.handle_key_help(k),
+            Mode::DeleteConfirm => self.handle_key_delete_confirm(k, store),
             Mode::Normal => self.handle_key_normal(k, store),
         }
     }
@@ -169,6 +178,20 @@ impl AppState {
     fn handle_key_normal(&mut self, k: KeyEvent, store: &mut Store) -> bool {
         match k.code {
             KeyCode::Char('q') => return true,
+            KeyCode::Char('?') => {
+                self.mode = Mode::Help;
+            }
+            KeyCode::Char('D') => {
+                let rows = sidebar_rows(store, &self.expanded);
+                let idx = self.sidebar_cursor.min(rows.len().saturating_sub(1));
+                let on_delete_target = matches!(
+                    rows.get(idx),
+                    Some(SidebarRow::ClosedHeader { .. }) | Some(SidebarRow::DeleteClosedRow)
+                );
+                if on_delete_target {
+                    self.mode = Mode::DeleteConfirm;
+                }
+            }
             KeyCode::Tab => {
                 self.focus = if self.focus == Focus::Sidebar {
                     Focus::Stream
@@ -211,11 +234,12 @@ impl AppState {
             KeyCode::Down | KeyCode::Char('j') => match self.focus {
                 Focus::Sidebar => self.sidebar_cursor = self.sidebar_cursor.saturating_add(1),
                 Focus::Stream => {
+                    let bottom = self.bottom_index(store);
                     if self.follow {
-                        self.stream_cursor = self.bottom_index(store);
+                        self.stream_cursor = bottom;
                         self.follow = false;
                     } else {
-                        self.stream_cursor = self.stream_cursor.saturating_add(1);
+                        self.stream_cursor = self.stream_cursor.saturating_add(1).min(bottom);
                     }
                 }
             },
@@ -302,6 +326,33 @@ impl AppState {
         false
     }
 
+    fn handle_key_help(&mut self, k: KeyEvent) -> bool {
+        match k.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                self.mode = Mode::Normal;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_key_delete_confirm(&mut self, k: KeyEvent, store: &mut Store) -> bool {
+        match k.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                store.delete_closed_sessions();
+                self.sidebar_cursor = 0;
+                self.selected_session = None;
+                self.selected_project = None;
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.mode = Mode::Normal;
+            }
+            _ => {}
+        }
+        false
+    }
+
     /// Last visible (filtered) stream item index in the selected session, or 0 if none.
     fn bottom_index(&self, store: &Store) -> usize {
         let Some(sid) = &self.selected_session else {
@@ -319,7 +370,10 @@ impl AppState {
             SidebarRow::Session { project_slug, .. } => {
                 Some(ExpandTarget::Project(project_slug.clone()))
             }
-            SidebarRow::ClosedHeader { .. } => Some(ExpandTarget::Closed),
+            SidebarRow::ClosedHeader { .. } | SidebarRow::DeleteClosedRow => {
+                Some(ExpandTarget::Closed)
+            }
+            SidebarRow::SubAgentHeader { .. } => Some(ExpandTarget::SubAgents),
         }
     }
 
@@ -353,8 +407,10 @@ impl AppState {
                     self.stream_viewport = 0;
                 }
             }
-            SidebarRow::ClosedHeader { .. } => {
-                // Header row: don't change session selection.
+            SidebarRow::ClosedHeader { .. }
+            | SidebarRow::SubAgentHeader { .. }
+            | SidebarRow::DeleteClosedRow => {
+                // Header/action rows: don't change session selection.
             }
         }
     }
@@ -376,14 +432,20 @@ pub enum SidebarRow {
         session_count: usize,
         expanded: bool,
     },
+    SubAgentHeader {
+        session_count: usize,
+        expanded: bool,
+    },
+    DeleteClosedRow,
 }
 
 /// Whether an event should appear in the stream given the current visibility
 /// preferences. Hides low-value meta types by default.
 pub fn is_visible(rec: &EventRecord, show_meta: bool) -> bool {
     match &rec.event {
-        Event::User(_) | Event::Assistant { .. } | Event::Unknown(_) => true,
-        Event::System { .. }
+        Event::User(UserContent::Text(_)) | Event::Assistant { .. } | Event::Unknown(_) => true,
+        Event::User(UserContent::ToolResults(_))
+        | Event::System { .. }
         | Event::Attachment(_)
         | Event::AiTitle(_)
         | Event::LastPrompt(_)
@@ -515,11 +577,18 @@ pub fn filtered_count(store: &Store, session_id: &str, filter: &str, show_meta: 
     stream_items(s, filter, show_meta).len()
 }
 
+/// A session is considered a sub-agent if it was explicitly launched as a
+/// background sub-agent from another session. Detection currently relies on
+/// the absence of any human-typed first_user_line combined with is_background;
+/// this is a best-effort heuristic until JSONL includes a parentSessionId field.
+fn is_sub_agent(s: &crate::data::Session) -> bool {
+    s.is_background && s.first_user_line.is_none() && s.title.is_none()
+}
+
 pub fn sidebar_rows(store: &Store, expanded: &HashSet<String>) -> Vec<SidebarRow> {
     let mut rows = Vec::new();
-    let mut closed_proj_count = 0;
-    let mut closed_sess_count = 0;
-    // First pass: render the live section.
+
+    // Section 1: Live (non-sub-agent, live sessions).
     for slug in store.project_order_by_recency() {
         let Some(project) = store.projects.get(&slug) else {
             continue;
@@ -531,22 +600,10 @@ pub fn sidebar_rows(store: &Store, expanded: &HashSet<String>) -> Vec<SidebarRow
                 store
                     .sessions
                     .get(*sid)
-                    .map(is_session_live)
+                    .map(|s| is_session_live(s) && !is_sub_agent(s))
                     .unwrap_or(false)
             })
             .collect();
-        let closed_count = project.sessions.len() - live.len();
-        if closed_count > 0 {
-            // Track whether this project contributes to the Closed section.
-            if live.is_empty() {
-                closed_proj_count += 1;
-            } else {
-                // Projects with both live and closed sessions are still tallied as having
-                // closed sessions but we won't double-count them as a "closed project".
-                // The Closed header reports projects whose only contribution is closed.
-            }
-            closed_sess_count += closed_count;
-        }
         if live.is_empty() {
             continue;
         }
@@ -565,38 +622,93 @@ pub fn sidebar_rows(store: &Store, expanded: &HashSet<String>) -> Vec<SidebarRow
         }
     }
 
-    // Closed section (always at the bottom if there are any closed sessions).
-    if closed_sess_count > 0 {
-        // Recompute closed_proj_count to include projects that have any closed
-        // sessions (not just projects that are entirely closed) — these are
-        // the projects that will appear if you expand the dropdown.
-        let mut visible_closed_projs = 0;
-        for slug in store.projects.keys() {
-            if store
-                .projects
-                .get(slug)
-                .map(|p| {
-                    p.sessions.iter().any(|sid| {
-                        store
-                            .sessions
-                            .get(sid)
-                            .map(|s| !is_session_live(s))
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false)
-            {
-                visible_closed_projs += 1;
+    // Section 2: Sub-agents (background sessions without a user-visible title/first-line).
+    let sub_agent_ids: Vec<String> = {
+        let mut ids: Vec<String> = store
+            .sessions
+            .iter()
+            .filter(|(_, s)| is_sub_agent(s))
+            .map(|(id, _)| id.clone())
+            .collect();
+        // Sort by last activity descending.
+        ids.sort_by(|a, b| {
+            let ta = store
+                .sessions
+                .get(a)
+                .and_then(|s| s.last_event.or(s.last_mtime));
+            let tb = store
+                .sessions
+                .get(b)
+                .and_then(|s| s.last_event.or(s.last_mtime));
+            tb.cmp(&ta)
+        });
+        ids
+    };
+    if !sub_agent_ids.is_empty() {
+        let sub_expanded = expanded.contains(SUB_AGENT_KEY);
+        rows.push(SidebarRow::SubAgentHeader {
+            session_count: sub_agent_ids.len(),
+            expanded: sub_expanded,
+        });
+        if sub_expanded {
+            for sid in &sub_agent_ids {
+                let proj_slug = store
+                    .sessions
+                    .get(sid)
+                    .map(|s| s.project_slug.clone())
+                    .unwrap_or_default();
+                rows.push(SidebarRow::Session {
+                    project_slug: proj_slug,
+                    session_id: sid.clone(),
+                    closed: false,
+                });
             }
         }
+    }
+
+    // Section 3: Closed (non-sub-agent, non-live sessions).
+    let mut visible_closed_projs = 0;
+    let mut closed_sess_count = 0;
+    for slug in store.projects.keys() {
+        let has_closed = store
+            .projects
+            .get(slug)
+            .map(|p| {
+                p.sessions.iter().any(|sid| {
+                    store
+                        .sessions
+                        .get(sid)
+                        .map(|s| !is_session_live(s) && !is_sub_agent(s))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        if has_closed {
+            visible_closed_projs += 1;
+            if let Some(p) = store.projects.get(slug) {
+                closed_sess_count += p
+                    .sessions
+                    .iter()
+                    .filter(|sid| {
+                        store
+                            .sessions
+                            .get(*sid)
+                            .map(|s| !is_session_live(s) && !is_sub_agent(s))
+                            .unwrap_or(false)
+                    })
+                    .count();
+            }
+        }
+    }
+    if closed_sess_count > 0 {
         let header_expanded = expanded.contains(CLOSED_KEY);
         rows.push(SidebarRow::ClosedHeader {
             project_count: visible_closed_projs,
             session_count: closed_sess_count,
             expanded: header_expanded,
         });
-        let _ = closed_proj_count; // unused now; kept for clarity above
         if header_expanded {
+            rows.push(SidebarRow::DeleteClosedRow);
             for slug in store.project_order_by_recency() {
                 let Some(project) = store.projects.get(&slug) else {
                     continue;
@@ -608,7 +720,7 @@ pub fn sidebar_rows(store: &Store, expanded: &HashSet<String>) -> Vec<SidebarRow
                         store
                             .sessions
                             .get(*sid)
-                            .map(|s| !is_session_live(s))
+                            .map(|s| !is_session_live(s) && !is_sub_agent(s))
                             .unwrap_or(false)
                     })
                     .collect();

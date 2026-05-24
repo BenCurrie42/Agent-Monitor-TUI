@@ -18,7 +18,8 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 
 - **`AppState`** (`app.rs`) — all mutable UI state: focus, mode, follow, cursors, viewport, filter, expanded set
 - **`Store`** (`store.rs`) — `BTreeMap<String, Project>` + `HashMap<String, Session>`
-- **`EventRecord`** (`data.rs`) — parsed JSONL line: `Event` enum + timestamp, model, sidechain flag, byte offset
+- **`EventRecord`** (`data.rs`) — parsed JSONL line: `Event` enum + timestamp, model, sidechain flag, `session_kind`, byte offset
+- **`Session`** (`data.rs`) — includes `is_background` (set when `sessionKind == "bg"`) and `process_open` (set via lsof polling)
 - **`FsEvent`** (`store.rs`) — `Created | Modified | Removed(PathBuf)` dispatched from the watcher thread
 
 ## Data flow
@@ -28,9 +29,12 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
         │
         ├─[startup] Store::initial_scan → metadata_scan_session (64KB head + 16KB tail read)
         ├─[select]  Store::ensure_loaded → full_load_session (full parse)
-        └─[watch]   WatcherHandle → FsEvent → Store::apply_fs_event → tail_load_session
+        ├─[watch]   WatcherHandle → FsEvent → Store::apply_fs_event → tail_load_session
+        │                                               │
+        │                                     AppEvent::Fs → main loop → render
+        └─[lsof]    background thread (every 5s) → claude_open_files()
                                                         │
-                                              AppEvent::Fs → main loop → render
+                                              AppEvent::OpenFiles → Store::apply_open_files → Session.process_open
 ```
 
 ## Loading strategy
@@ -41,7 +45,7 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 
 ## Liveness
 
-Sessions with activity within `LIVE_THRESHOLD_SECS` (300s) are "live". The sidebar splits live and closed sessions; the closed section is collapsible. The header badge uses green (<30s) / yellow (<5min) / gray.
+A session is "live" if its JSONL file is currently held open by a `claude` process (`process_open: true`, checked via `lsof` every 5 s), **or** if its last event timestamp is within `LIVE_THRESHOLD_SECS` (300 s). The sidebar has three sections: live sessions, sub-agents (background sessions with no user-visible title or first user line), and a collapsible closed section. The session-info liveness badge uses green (<30 s or process open) / yellow (<5 min) / gray.
 
 ## CLI flags
 
@@ -55,4 +59,4 @@ Sessions with activity within `LIVE_THRESHOLD_SECS` (300s) are "live". The sideb
 
 ## Version
 
-0.0.1 — 2026-05-23
+0.0.2 — 2026-05-23

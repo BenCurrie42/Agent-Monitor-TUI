@@ -14,6 +14,9 @@ use crate::data::{
 pub const LIVE_THRESHOLD_SECS: i64 = 300;
 
 pub fn is_session_live(s: &Session) -> bool {
+    if s.process_open {
+        return true;
+    }
     let Some(t) = s.last_event.or(s.last_mtime) else {
         return false;
     };
@@ -164,6 +167,29 @@ impl Store {
         Ok(())
     }
 
+    /// Delete all closed (non-live) sessions from disk and remove them from the store.
+    /// Returns the number of sessions deleted.
+    pub fn delete_closed_sessions(&mut self) -> usize {
+        let closed_ids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| !is_session_live(s))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let count = closed_ids.len();
+        for sid in &closed_ids {
+            if let Some(s) = self.sessions.get(sid) {
+                let _ = std::fs::remove_file(&s.file);
+            }
+            self.sessions.remove(sid);
+        }
+        for project in self.projects.values_mut() {
+            project.sessions.retain(|sid| !closed_ids.contains(sid));
+        }
+        self.projects.retain(|_, p| !p.sessions.is_empty());
+        count
+    }
+
     pub fn apply_fs_event(&mut self, ev: FsEvent, _debug: bool) {
         match ev {
             FsEvent::Modified(path) => self.on_modified(&path),
@@ -269,6 +295,13 @@ impl Store {
         }
     }
 
+    /// Update `process_open` for all sessions based on the given set of open file paths.
+    pub fn apply_open_files(&mut self, open_paths: &std::collections::HashSet<std::path::PathBuf>) {
+        for s in self.sessions.values_mut() {
+            s.process_open = open_paths.contains(&s.file);
+        }
+    }
+
     /// Re-read the original JSON line for an event by its byte offset.
     pub fn raw_line_for(&self, session_id: &str, offset: u64, len: u64) -> Option<String> {
         let s = self.sessions.get(session_id)?;
@@ -329,6 +362,9 @@ fn metadata_scan_session(session: &mut Session) {
         if let Some(rec) = parse_line(line, 0) {
             if session.started.is_none() {
                 session.started = rec.timestamp;
+            }
+            if rec.session_kind.as_deref() == Some("bg") {
+                session.is_background = true;
             }
             match &rec.event {
                 Event::AiTitle(t) if !t.trim().is_empty() => {
@@ -524,6 +560,9 @@ fn apply_event_side_effects(session: &mut Session, rec: &EventRecord) {
     }
     if rec.is_sidechain {
         session.sidechain_event_count += 1;
+    }
+    if rec.session_kind.as_deref() == Some("bg") {
+        session.is_background = true;
     }
     match &rec.event {
         Event::AiTitle(t) if !t.trim().is_empty() => session.title = Some(t.clone()),

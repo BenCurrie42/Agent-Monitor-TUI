@@ -4,6 +4,7 @@ mod store;
 mod ui;
 mod watcher;
 
+use std::collections::HashSet;
 use std::io;
 use std::panic;
 use std::path::PathBuf;
@@ -113,6 +114,20 @@ fn run(
 
     let (tx, rx) = unbounded::<AppEvent>();
 
+    // Initial open-file check (synchronous, before first render).
+    store.apply_open_files(&claude_open_files());
+
+    // Background open-file checker: re-checks every 5s via lsof.
+    {
+        let tx = tx.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(5));
+            if tx.send(AppEvent::OpenFiles(claude_open_files())).is_err() {
+                return;
+            }
+        });
+    }
+
     // Input poll thread
     {
         let tx = tx.clone();
@@ -164,6 +179,10 @@ fn run(
                     Ok(AppEvent::Resize) => true,
                     Ok(AppEvent::Fs(fs_ev)) => {
                         store.apply_fs_event(fs_ev, args.debug);
+                        true
+                    }
+                    Ok(AppEvent::OpenFiles(paths)) => {
+                        store.apply_open_files(&paths);
                         true
                     }
                     Err(_) => return Ok(()),
@@ -298,6 +317,26 @@ fn resolve_session_id(store: &Store, query: &str) -> Result<String> {
         1 => Ok(matches[0].clone()),
         n => anyhow::bail!("{n} sessions match prefix '{query}'; disambiguate"),
     }
+}
+
+/// Returns the set of JSONL file paths currently held open by any `claude` process.
+/// Uses `lsof -F n -c claude`; returns an empty set if lsof is unavailable or fails.
+fn claude_open_files() -> HashSet<PathBuf> {
+    let Ok(out) = std::process::Command::new("lsof")
+        .args(["-F", "n", "-c", "claude"])
+        .output()
+    else {
+        return HashSet::new();
+    };
+    let Ok(stdout) = std::str::from_utf8(&out.stdout) else {
+        return HashSet::new();
+    };
+    stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix('n'))
+        .filter(|p| p.ends_with(".jsonl"))
+        .map(PathBuf::from)
+        .collect()
 }
 
 fn install_panic_hook() {

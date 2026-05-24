@@ -76,11 +76,13 @@ pub struct Session {
     pub started: Option<DateTime<Utc>>,
     pub last_event: Option<DateTime<Utc>>,
     pub last_mtime: Option<DateTime<Utc>>,
+    pub process_open: bool,
     pub events: Vec<EventRecord>,
     pub usage_totals: UsageTotals,
     pub byte_offset: u64,
     pub loaded: bool,
     pub sidechain_event_count: usize,
+    pub is_background: bool,
     /// tool_use id → (event_idx, block_idx) for the originating tool_use block.
     pub tool_use_index: HashMap<String, (usize, usize)>,
     /// tool_use id → (event_idx, result_idx) for the tool_result that replied to it.
@@ -98,11 +100,13 @@ impl Session {
             started: None,
             last_event: None,
             last_mtime: None,
+            process_open: false,
             events: Vec::new(),
             usage_totals: UsageTotals::default(),
             byte_offset: 0,
             loaded: false,
             sidechain_event_count: 0,
+            is_background: false,
             tool_use_index: HashMap::new(),
             tool_result_index: HashMap::new(),
         }
@@ -205,6 +209,7 @@ pub struct EventRecord {
     #[allow(dead_code)]
     pub parent_uuid: Option<String>,
     pub is_sidechain: bool,
+    pub session_kind: Option<String>,
     pub timestamp: Option<DateTime<Utc>>,
     pub event: Event,
     pub model: Option<String>,
@@ -281,6 +286,8 @@ struct RawRecord {
     parent_uuid: Option<String>,
     #[serde(default, rename = "isSidechain")]
     is_sidechain: Option<bool>,
+    #[serde(default, rename = "sessionKind")]
+    session_kind: Option<String>,
     #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
@@ -343,6 +350,7 @@ pub fn parse_line(line: &str, file_offset: u64) -> Option<EventRecord> {
         uuid: raw.uuid,
         parent_uuid: raw.parent_uuid,
         is_sidechain: raw.is_sidechain.unwrap_or(false),
+        session_kind: raw.session_kind,
         timestamp,
         event,
         model,

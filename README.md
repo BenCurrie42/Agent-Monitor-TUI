@@ -43,6 +43,8 @@ Enter          open detail view for selected event
 f              toggle follow (auto-scroll)
 v              toggle meta event visibility
 g / G          jump to top / bottom
+D              delete all closed sessions (confirmation prompt)
+?              show help overlay
 Esc            clear filter
 q              quit
 
@@ -57,7 +59,7 @@ In detail view:
 
 Claude Code writes every conversation event to a JSONL file under `~/.claude/projects/<slug>/<session-id>.jsonl`. This tool watches that directory for changes, parses the JSONL on the fly, and streams events into the UI as they arrive.
 
-Sessions are split into **live** (activity in the last 5 minutes) and **closed** sections. Token usage and estimated cost (Opus / Sonnet / Haiku) are tracked per session.
+Sessions are split into **live** (activity in the last 5 minutes, or JSONL file currently held open by a `claude` process), **sub-agents** (background sessions with no user-visible title), and **closed** sections. Token usage and estimated cost (Opus / Sonnet / Haiku) are tracked per session.
 
 ## License
 
