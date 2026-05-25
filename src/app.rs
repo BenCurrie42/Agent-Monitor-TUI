@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -92,6 +93,21 @@ pub struct AppState {
     /// Cursor in the theme list while the settings view is open. Reset to the
     /// applied theme each time settings is opened.
     pub theme_menu_index: usize,
+    /// Per-frame cache of the sidebar tree. Populated once by
+    /// `resolve_selection()` so render/handler paths can share it.
+    pub sidebar_rows_cache: Vec<SidebarRow>,
+    /// Memoized unfiltered stream-items list for the currently selected
+    /// session. Invalidated when (session_id, events.len(), show_meta) changes.
+    /// `RefCell` so a `&AppState` can populate it on demand during render.
+    stream_cache: RefCell<StreamCache>,
+}
+
+#[derive(Default)]
+struct StreamCache {
+    session_id: String,
+    events_len: usize,
+    show_meta: bool,
+    items: Vec<StreamItem>,
 }
 
 impl AppState {
@@ -115,6 +131,62 @@ impl AppState {
             active_view: ActiveView::Main,
             selected_theme: ThemeVariant::Coffee,
             theme_menu_index: 0,
+            sidebar_rows_cache: Vec::new(),
+            stream_cache: RefCell::new(StreamCache::default()),
+        }
+    }
+
+    /// Filtered stream items for `session`. Uses an internal cache keyed by
+    /// (session_id, events.len(), show_meta) so the per-event expansion only
+    /// runs when those change; subsequent frames just walk the cached list and
+    /// apply the (cheap) filter retain.
+    pub fn stream_items_for(&self, session: &Session) -> Vec<StreamItem> {
+        let mut cache = self.stream_cache.borrow_mut();
+        let key_changed = cache.session_id != session.id
+            || cache.events_len != session.events.len()
+            || cache.show_meta != self.show_meta;
+        if key_changed {
+            cache.session_id.clear();
+            cache.session_id.push_str(&session.id);
+            cache.events_len = session.events.len();
+            cache.show_meta = self.show_meta;
+            cache.items = build_stream_items(session, self.show_meta);
+        }
+        if self.filter.is_empty() {
+            cache.items.clone()
+        } else {
+            cache
+                .items
+                .iter()
+                .copied()
+                .filter(|it| item_matches(session, it, &self.filter))
+                .collect()
+        }
+    }
+
+    /// Count of filtered items for the bottom-clamp logic. Cheaper than
+    /// allocating the full Vec via `stream_items_for` when only the length
+    /// matters and no filter is set.
+    pub fn stream_items_len_for(&self, session: &Session) -> usize {
+        let mut cache = self.stream_cache.borrow_mut();
+        let key_changed = cache.session_id != session.id
+            || cache.events_len != session.events.len()
+            || cache.show_meta != self.show_meta;
+        if key_changed {
+            cache.session_id.clear();
+            cache.session_id.push_str(&session.id);
+            cache.events_len = session.events.len();
+            cache.show_meta = self.show_meta;
+            cache.items = build_stream_items(session, self.show_meta);
+        }
+        if self.filter.is_empty() {
+            cache.items.len()
+        } else {
+            cache
+                .items
+                .iter()
+                .filter(|it| item_matches(session, it, &self.filter))
+                .count()
         }
     }
 
@@ -220,10 +292,13 @@ impl AppState {
                     .unwrap_or(0);
             }
             KeyCode::Char('D') => {
-                let rows = sidebar_rows(store, &self.expanded);
-                let idx = self.sidebar_cursor.min(rows.len().saturating_sub(1));
+                // Reuse the cached rows populated by the prior resolve_selection;
+                // the sidebar tree can't have changed between then and this keypress.
+                let idx = self
+                    .sidebar_cursor
+                    .min(self.sidebar_rows_cache.len().saturating_sub(1));
                 let on_delete_target = matches!(
-                    rows.get(idx),
+                    self.sidebar_rows_cache.get(idx),
                     Some(SidebarRow::ClosedHeader { .. }) | Some(SidebarRow::DeleteClosedRow)
                 );
                 if on_delete_target {
@@ -251,19 +326,26 @@ impl AppState {
             KeyCode::Char('v') => {
                 // Remember the event under the cursor and its visual row within the
                 // viewport, so we can restore both after the item list changes size.
-                let anchor = self.selected_session.as_ref()
+                let anchor = self
+                    .selected_session
+                    .as_ref()
                     .and_then(|sid| store.sessions.get(sid))
                     .and_then(|s| {
-                        let items = stream_items(s, &self.filter, self.show_meta);
+                        let items = self.stream_items_for(s);
                         let cur = self.stream_cursor.min(items.len().saturating_sub(1));
                         let visual_row = cur.saturating_sub(self.stream_viewport);
                         items.get(cur).map(|it| (it.event_idx, visual_row))
                     });
                 self.show_meta = !self.show_meta;
                 if let Some((event_idx, visual_row)) = anchor {
-                    if let Some(s) = self.selected_session.as_ref().and_then(|sid| store.sessions.get(sid)) {
-                        let new_items = stream_items(s, &self.filter, self.show_meta);
-                        let new_cursor = new_items.iter()
+                    if let Some(s) = self
+                        .selected_session
+                        .as_ref()
+                        .and_then(|sid| store.sessions.get(sid))
+                    {
+                        let new_items = self.stream_items_for(s);
+                        let new_cursor = new_items
+                            .iter()
                             .position(|it| it.event_idx == event_idx)
                             .unwrap_or_else(|| new_items.len().saturating_sub(1));
                         self.stream_cursor = new_cursor;
@@ -435,7 +517,10 @@ impl AppState {
         let Some(sid) = &self.selected_session else {
             return 0;
         };
-        filtered_count(store, sid, &self.filter, self.show_meta).saturating_sub(1)
+        let Some(s) = store.sessions.get(sid) else {
+            return 0;
+        };
+        self.stream_items_len_for(s).saturating_sub(1)
     }
 
     /// Called by ui::render after laying out rows, so we know what's actually selected.
@@ -443,23 +528,26 @@ impl AppState {
     /// still exists — so background activity (FS events, lsof ticks) that reorders
     /// rows doesn't drag the cursor onto a different session.
     pub fn resolve_selection(&mut self, store: &mut Store) {
-        let rows = sidebar_rows(store, &self.expanded);
-        if rows.is_empty() {
+        // Rebuild the sidebar rows once per tick and stash them so the
+        // render path and any key handlers can reuse the same Vec instead of
+        // walking the sessions map multiple times per frame.
+        self.sidebar_rows_cache = sidebar_rows(store, &self.expanded);
+        if self.sidebar_rows_cache.is_empty() {
             self.selected_session = None;
             return;
         }
         if let Some(sid) = &self.selected_session {
-            if let Some(idx) = rows.iter().position(
+            if let Some(idx) = self.sidebar_rows_cache.iter().position(
                 |r| matches!(r, SidebarRow::Session { session_id, .. } if session_id == sid),
             ) {
                 self.sidebar_cursor = idx;
             }
         }
-        let max = rows.len().saturating_sub(1);
+        let max = self.sidebar_rows_cache.len().saturating_sub(1);
         if self.sidebar_cursor > max {
             self.sidebar_cursor = max;
         }
-        match &rows[self.sidebar_cursor] {
+        match &self.sidebar_rows_cache[self.sidebar_cursor] {
             SidebarRow::Project { slug, .. } => {
                 self.selected_project = Some(slug.clone());
                 self.selected_session = None;
@@ -667,10 +755,11 @@ pub fn is_visible(rec: &EventRecord, show_meta: bool) -> bool {
     }
 }
 
-/// Expand a session into stream items honoring visibility + filter.
-/// Each StreamItem is a single navigable/openable row.
-pub fn stream_items(session: &Session, filter: &str, show_meta: bool) -> Vec<StreamItem> {
-    let mut items = Vec::new();
+/// Build the unfiltered stream-item list for a session. Internal helper for
+/// `AppState::stream_items_for`; UI/handler paths should go through that
+/// method so they hit the per-AppState cache instead of rebuilding.
+pub fn build_stream_items(session: &Session, show_meta: bool) -> Vec<StreamItem> {
+    let mut items = Vec::with_capacity(session.events.len());
     for (i, rec) in session.events.iter().enumerate() {
         if !is_visible(rec, show_meta) {
             continue;
@@ -697,9 +786,6 @@ pub fn stream_items(session: &Session, filter: &str, show_meta: bool) -> Vec<Str
                 sub_idx: None,
             }),
         }
-    }
-    if !filter.is_empty() {
-        items.retain(|it| item_matches(session, it, filter));
     }
     items
 }
@@ -781,13 +867,6 @@ pub fn item_matches(session: &Session, item: &StreamItem, needle_lower: &str) ->
         (Event::User(UserContent::ToolResults(_)), None) => push(&mut buf, "result"),
     }
     buf.to_lowercase().contains(needle_lower)
-}
-
-pub fn filtered_count(store: &Store, session_id: &str, filter: &str, show_meta: bool) -> usize {
-    let Some(s) = store.sessions.get(session_id) else {
-        return 0;
-    };
-    stream_items(s, filter, show_meta).len()
 }
 
 /// A session is considered a sub-agent if it was explicitly launched as a

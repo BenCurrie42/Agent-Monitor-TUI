@@ -7,8 +7,7 @@ use ratatui::Frame;
 use serde_json::Value;
 
 use crate::app::{
-    stream_items, sidebar_rows, ActiveView, AppState, DetailView, Focus, Mode, SidebarRow,
-    StreamItem,
+    ActiveView, AppState, DetailView, Focus, Mode, SidebarRow, StreamItem,
 };
 use crate::store::is_session_live;
 use crate::data::{
@@ -93,9 +92,11 @@ pub fn render(f: &mut Frame, store: &Store, app: &mut AppState) {
 }
 
 fn render_sidebar(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
-    let rows = sidebar_rows(store, &app.expanded);
+    // Reuse the rows already built by resolve_selection this tick instead of
+    // walking the sessions map again.
+    let rows = &app.sidebar_rows_cache;
     let mut items: Vec<ListItem> = Vec::with_capacity(rows.len());
-    for row in &rows {
+    for row in rows.iter() {
         match row {
             SidebarRow::Project { slug, closed } => {
                 let proj = store.projects.get(slug);
@@ -401,7 +402,7 @@ fn render_stream(f: &mut Frame, store: &Store, app: &mut AppState, area: Rect, f
         return;
     };
 
-    let items = stream_items(session, &app.filter, app.show_meta);
+    let items = app.stream_items_for(session);
     if items.is_empty() {
         let msg = if !app.filter.is_empty() {
             format!("No events match \"{}\". Esc to clear.", app.filter)
@@ -763,7 +764,7 @@ fn render_detail_modal(f: &mut Frame, store: &Store, app: &mut AppState, area: R
 }
 
 fn current_item(session: &Session, app: &AppState) -> Option<StreamItem> {
-    let items = stream_items(session, &app.filter, app.show_meta);
+    let items = app.stream_items_for(session);
     if items.is_empty() {
         return None;
     }

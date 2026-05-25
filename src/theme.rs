@@ -1,5 +1,6 @@
 use ratatui::style::Color;
-use std::sync::{OnceLock, RwLock};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeVariant {
@@ -28,6 +29,26 @@ impl ThemeVariant {
             ThemeVariant::DefaultDark => "Default Dark",
         }
     }
+
+    fn as_u8(self) -> u8 {
+        match self {
+            ThemeVariant::Coffee => 0,
+            ThemeVariant::NordicFrost => 1,
+            ThemeVariant::ForestMoss => 2,
+            ThemeVariant::Cyberpunk => 3,
+            ThemeVariant::DefaultDark => 4,
+        }
+    }
+
+    fn from_u8(b: u8) -> Self {
+        match b {
+            1 => ThemeVariant::NordicFrost,
+            2 => ThemeVariant::ForestMoss,
+            3 => ThemeVariant::Cyberpunk,
+            4 => ThemeVariant::DefaultDark,
+            _ => ThemeVariant::Coffee,
+        }
+    }
 }
 
 /// Semantic color slots. UI code references these by purpose (border,
@@ -46,10 +67,15 @@ pub struct Theme {
 }
 
 fn truecolor() -> bool {
-    matches!(
-        std::env::var("COLORTERM").as_deref(),
-        Ok("truecolor") | Ok("24bit")
-    )
+    // Cached at first call: COLORTERM doesn't change during a session and
+    // env::var is otherwise hit on every Color resolution × every frame.
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        matches!(
+            std::env::var("COLORTERM").as_deref(),
+            Ok("truecolor") | Ok("24bit")
+        )
+    })
 }
 
 /// RGB when the terminal advertises truecolor, otherwise the named fallback.
@@ -118,18 +144,21 @@ impl Theme {
     }
 }
 
-static CURRENT: OnceLock<RwLock<Theme>> = OnceLock::new();
+// Theme storage is a single atomic byte: the variant index. Reads in
+// `current()` reconstruct the 8-slot Theme on demand — cheaper than a RwLock
+// since `c_*()` helpers fire dozens of times per frame and the rebuild is
+// just a match returning Copy fields. Cached truecolor() makes each rebuild
+// branch-only with no syscalls.
+static CURRENT_VARIANT: AtomicU8 = AtomicU8::new(0);
 
-fn cell() -> &'static RwLock<Theme> {
-    CURRENT.get_or_init(|| RwLock::new(Theme::for_variant(ThemeVariant::Coffee)))
-}
-
-/// Returns a snapshot of the currently active theme. Cheap (Copy) so callers
-/// can read individual fields multiple times without holding the lock.
+/// Returns a snapshot of the currently active theme. Lock-free; safe to call
+/// hundreds of times per frame.
 pub fn current() -> Theme {
-    *cell().read().expect("theme lock poisoned")
+    Theme::for_variant(ThemeVariant::from_u8(
+        CURRENT_VARIANT.load(Ordering::Relaxed),
+    ))
 }
 
 pub fn set(variant: ThemeVariant) {
-    *cell().write().expect("theme lock poisoned") = Theme::for_variant(variant);
+    CURRENT_VARIANT.store(variant.as_u8(), Ordering::Relaxed);
 }
