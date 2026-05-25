@@ -10,16 +10,17 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 | `src/app.rs` | `AppState`, keyboard handling, `sidebar_rows`, `stream_items`, filter matching |
 | `src/data.rs` | Data model, JSONL `parse_line`, `UsageTotals`, `ModelPrice`, `model_context_window`, slug decoding |
 | `src/store.rs` | `Store`: project/session maps, initial scan, lazy full load, incremental tail load, FS event handling |
+| `src/theme.rs` | 5-theme color system; `ThemeVariant` enum, `ThemeColors` struct, lock-free `set()`/`current()` API |
 | `src/ui.rs` | All `ratatui` rendering: sidebar, header, event stream, detail modal, filter overlay, statusline |
 | `src/watcher.rs` | `notify-debouncer-mini` watcher; maps FS events to `FsEvent` enum |
 | `build.rs` | macOS SDK lib path discovery via `xcrun` (libiconv linker workaround for nix toolchains) |
 
 ## Key types
 
-- **`AppState`** (`app.rs`) — all mutable UI state: focus, mode, follow, cursors, viewport, filter, expanded set
+- **`AppState`** (`app.rs`) — all mutable UI state: focus, mode, follow, cursors, viewport, filter, expanded set, `sidebar_collapsed`, `active_view` (`Main`/`Settings`), `selected_theme`, `theme_menu_index`, `sidebar_rows_cache`, `stream_cache` (per-frame `RefCell` cache keyed on session_id + events.len + show_meta)
 - **`Store`** (`store.rs`) — `BTreeMap<String, Project>` + `HashMap<String, Session>`
 - **`EventRecord`** (`data.rs`) — parsed JSONL line: `Event` enum + timestamp, model, sidechain flag, `session_kind`, byte offset
-- **`Session`** (`data.rs`) — includes `is_background` (set when `sessionKind == "bg"`), `process_open` (set via lsof polling), `project_has_claude` (any claude CWD matches this project), `process_ever_open` (latches true once seen), `process_closed_at` (timestamp of last close), `exit_observed` (set on `/exit`/`/quit` command), `last_input_tokens` (sum of all input-side tokens from most recent assistant turn — represents current context size)
+- **`Session`** (`data.rs`) — includes `is_background` (set when `sessionKind == "bg"`), `process_open` (set via lsof polling), `project_has_claude` (any claude CWD matches this project), `process_ever_open` (latches true once seen), `process_closed_at` (timestamp of last close), `exit_observed` (set on `/exit`/`/quit` command), `last_input_tokens` (sum of all input-side tokens from most recent assistant turn — represents current context size), `cwd` (actual working directory from first JSONL line — used for path simplification)
 - **`FsEvent`** (`store.rs`) — `Created | Modified | Removed(PathBuf)` dispatched from the watcher thread
 
 ## Data flow
@@ -67,4 +68,4 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 
 ## Version
 
-0.0.6 — 2026-05-24
+0.1.0 — 2026-05-25

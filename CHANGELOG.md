@@ -4,6 +4,29 @@ All notable changes are documented here.
 
 ---
 
+## [0.1.0] — 2026-05-25
+
+### Added
+- **Theme system** — 5 built-in color themes: Coffee (Espresso & Crema, default), Nordic Frost, Forest Moss, Cyberpunk Neon, and Default Dark. Runtime-switched without restart via lock-free `AtomicU8` in `src/theme.rs`. Each theme provides a semantic palette (`border`, `highlight`, `user_badge`, `assistant_badge`, `tool_badge`, `thinking`, `ctx_filled`, `ctx_empty`).
+- **Settings view** — press `s` to open a full-screen theme picker; `j`/`k` to navigate, `Enter` to apply, `Esc`/`s`/`q` to close. Applied theme persists across open/close cycles.
+- **Sidebar collapse** — press `b` to toggle the sidebar; focus automatically moves to the event stream when collapsed. Auto-collapses when terminal width < 100 columns.
+- **Path simplification in event stream** — Read/Write/Edit tool calls now display paths relative to the session's working directory. Absolute paths outside the project root are shown in full. Paths longer than 50 chars are middle-truncated with `…`.
+- **Session `cwd` field** — populated during the metadata scan from the first JSONL line that carries a `cwd` key; used for path simplification without requiring a full load.
+- **New sessions open at bottom** — selecting a session for the first time now starts the stream cursor and viewport at the bottom (follow mode) instead of the top.
+
+### Changed
+- **Modern event-stream labels** — `[USER]`, `[ASST]`, `[TOOL]`, `[OUT]`, `[ERR]`, `[THK]`, `[SYS]`, `[TTL]` replace the old freeform prefix strings (`user`, `asst`, `tool`, `↩`, etc.).
+- **All UI colors route through the active theme** — border, focus ring, badges, and CTX gauge bars now read from `theme::current()` instead of hardcoded `Color::*` constants.
+- **Viewport anchor preserved during `v` toggle** — toggling meta-event visibility now keeps the event under the cursor in the same visual row rather than jumping to position 0.
+- **Stream and sidebar caches** — `StreamCache` (keyed on session_id + events.len + show_meta) and `sidebar_rows_cache` are stored in `AppState`, eliminating redundant rebuilds on every render frame and key handler call.
+- **Control-character sanitization** — all rendered text strips `\r`, `\t`, ANSI escapes, and other control chars before passing to ratatui, preventing diagonal-cascade terminal artifacts caused by embedded escape sequences in tool output.
+- **Modal close repaint** — leaving Detail, Filter, Help, or DeleteConfirm mode now calls `terminal.clear()` to erase residual ratatui buffer cells from the closed overlay.
+- **`tool_summary` fallback** — unknown tools now serialize the full input JSON instead of returning an empty string.
+- **flake.nix** — updated Nix dependencies.
+
+### New files
+- `src/theme.rs` — 5-theme color system; `ThemeVariant` enum, per-theme `ThemeColors` struct, lock-free `set()`/`current()` API backed by `AtomicU8` + `OnceLock`.
+
 ## [0.0.6] — 2026-05-24
 
 ### Added

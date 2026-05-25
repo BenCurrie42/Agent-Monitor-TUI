@@ -50,6 +50,8 @@ Enter          open detail view for selected event
 /              filter events by text
 f              toggle follow (auto-scroll)
 v              toggle meta event visibility
+b              toggle sidebar collapse
+s              open Settings (theme picker)
 g / G          jump to top / bottom
 D              delete all closed sessions (confirmation prompt)
 ?              show help overlay
@@ -67,7 +69,7 @@ In detail view:
 
 Claude Code writes every conversation event to a JSONL file under `~/.claude/projects/<slug>/<session-id>.jsonl`. This tool watches that directory for changes, parses the JSONL on the fly, and streams events into the UI as they arrive.
 
-Sessions are split into **live** (activity in the last 5 minutes, or JSONL file currently held open by a `claude` process), **sub-agents** (background sessions with no user-visible title), and **closed** sections. Token usage, estimated cost (Opus / Sonnet / Haiku), and a **context window pressure gauge** (`CTX [████░░░░░░] 38%`) are shown per session in the header. File content from Read tool calls is **syntax-highlighted** by extension.
+Sessions are split into **live** (activity in the last 5 minutes, or JSONL file currently held open by a `claude` process), **sub-agents** (background sessions with no user-visible title), and **closed** sections. Token usage, estimated cost (Opus / Sonnet / Haiku), and a **context window pressure gauge** (`CTX [████░░░░░░] 38%`) are shown per session in the header. File content from Read tool calls is **syntax-highlighted** by extension. Press `s` to open the **Settings** view and pick from 5 color themes; press `b` to collapse the sidebar for a wider event stream.
 
 ## License
 
