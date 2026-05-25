@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::data::{AssistantBlock, Event, EventRecord, Session, UserContent};
 use crate::store::{is_session_live, FsEvent, Store};
+use crate::theme::{self, ThemeVariant};
 
 /// Sentinel "slug" used as the key for the Closed sessions dropdown in
 /// `AppState.expanded`. Not a real project slug.
@@ -42,6 +43,12 @@ pub enum DetailView {
     Raw,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveView {
+    Main,
+    Settings,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct StreamItem {
     pub event_idx: usize,
@@ -77,6 +84,14 @@ pub struct AppState {
     pub detail_scroll: u16,
     /// Sidebar manually collapsed by the user (also auto-collapsed when width < 100).
     pub sidebar_collapsed: bool,
+    /// Which top-level view is rendered. Settings replaces the main panels.
+    pub active_view: ActiveView,
+    /// Theme that has been applied (Enter in the picker). Persists across
+    /// open/close of the settings view.
+    pub selected_theme: ThemeVariant,
+    /// Cursor in the theme list while the settings view is open. Reset to the
+    /// applied theme each time settings is opened.
+    pub theme_menu_index: usize,
 }
 
 impl AppState {
@@ -97,6 +112,9 @@ impl AppState {
             filter_input: String::new(),
             detail_scroll: 0,
             sidebar_collapsed: false,
+            active_view: ActiveView::Main,
+            selected_theme: ThemeVariant::Coffee,
+            theme_menu_index: 0,
         }
     }
 
@@ -154,6 +172,9 @@ impl AppState {
         if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
             return true;
         }
+        if self.active_view == ActiveView::Settings {
+            return self.handle_key_settings(k);
+        }
         match self.mode {
             Mode::Filter => self.handle_key_filter(k),
             Mode::Detail => self.handle_key_detail(k),
@@ -163,11 +184,40 @@ impl AppState {
         }
     }
 
+    fn handle_key_settings(&mut self, k: KeyEvent) -> bool {
+        let n = ThemeVariant::ALL.len();
+        match k.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.theme_menu_index = (self.theme_menu_index + 1) % n;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.theme_menu_index = (self.theme_menu_index + n - 1) % n;
+            }
+            KeyCode::Enter => {
+                self.selected_theme = ThemeVariant::ALL[self.theme_menu_index];
+                theme::set(self.selected_theme);
+                self.active_view = ActiveView::Main;
+            }
+            KeyCode::Esc | KeyCode::Char('s') | KeyCode::Char('q') => {
+                self.active_view = ActiveView::Main;
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn handle_key_normal(&mut self, k: KeyEvent, store: &mut Store) -> bool {
         match k.code {
             KeyCode::Char('q') => return true,
             KeyCode::Char('?') => {
                 self.mode = Mode::Help;
+            }
+            KeyCode::Char('s') => {
+                self.active_view = ActiveView::Settings;
+                self.theme_menu_index = ThemeVariant::ALL
+                    .iter()
+                    .position(|v| *v == self.selected_theme)
+                    .unwrap_or(0);
             }
             KeyCode::Char('D') => {
                 let rows = sidebar_rows(store, &self.expanded);
