@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use serde_json::Value;
 
@@ -18,19 +18,51 @@ use crate::store::Store;
 
 pub fn render(f: &mut Frame, store: &Store, app: &mut AppState) {
     let area = f.area();
+
+    // Minimum terminal size wall.
+    if area.width < 80 || area.height < 20 {
+        f.render_widget(Clear, area);
+        let msg = format!(
+            "Terminal too small. Minimum: 80×20. Current: {}×{}",
+            area.width, area.height
+        );
+        let box_w = (msg.chars().count() as u16 + 4).min(area.width.max(4));
+        let box_h = 3u16.min(area.height.max(3));
+        let x = area.width.saturating_sub(box_w) / 2;
+        let y = area.height.saturating_sub(box_h) / 2;
+        let centered = Rect::new(x, y, box_w, box_h);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" Too Small ");
+        let inner = block.inner(centered);
+        f.render_widget(block, centered);
+        f.render_widget(Paragraph::new(msg).alignment(Alignment::Center), inner);
+        return;
+    }
+
     f.render_widget(Clear, area);
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(6), Constraint::Min(1), Constraint::Length(1)])
         .split(area);
+
+    let collapsed = (app.sidebar_collapsed || area.width < 100) && app.focus != Focus::Sidebar;
     let bottom = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .constraints(if collapsed {
+            vec![Constraint::Length(0), Constraint::Min(0)]
+        } else {
+            vec![Constraint::Percentage(30), Constraint::Percentage(70)]
+        })
         .split(outer[1]);
 
     render_session_info(f, store, app, outer[0]);
-    render_sidebar(f, store, app, bottom[0]);
-    render_stream(f, store, app, bottom[1]);
+    if !collapsed {
+        render_sidebar(f, store, app, bottom[0]);
+    }
+    render_stream(f, store, app, bottom[1], app.focus == Focus::Stream || collapsed);
     render_statusline(f, app, outer[2]);
 
     if app.mode == Mode::Detail {
@@ -180,6 +212,7 @@ fn render_sidebar(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border_style(app.focus == Focus::Sidebar))
         .title(title);
     let mut state = ListState::default();
@@ -196,6 +229,7 @@ fn render_sidebar(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
 fn render_session_info(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title(" Session Info ");
     let inner = block.inner(area);
     f.render_widget(Clear, area);
@@ -337,14 +371,15 @@ fn model_short_name(model: &str) -> String {
 }
 
 
-fn render_stream(f: &mut Frame, store: &Store, app: &mut AppState, area: Rect) {
+fn render_stream(f: &mut Frame, store: &Store, app: &mut AppState, area: Rect, focused: bool) {
     let mut title = String::from(" Events ");
     if !app.filter.is_empty() {
         title = format!(" Events  [filter: {}] ", app.filter);
     }
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(border_style(app.focus == Focus::Stream))
+        .border_type(BorderType::Rounded)
+        .border_style(border_style(focused))
         .title(title);
 
     let inner = block.inner(area);
@@ -439,8 +474,9 @@ fn render_statusline(f: &mut Frame, app: &AppState, area: Rect) {
         Mode::Normal | Mode::Help | Mode::DeleteConfirm => {
             let follow = if app.follow { "F" } else { "f" };
             let meta = if app.show_meta { "V" } else { "v" };
+            let sidebar = if app.sidebar_collapsed { "B" } else { "b" };
             format!(
-                " ? help · q quit · j/k navigate · Tab · / filter · [{follow}] follow · [{meta}] meta"
+                " ? help · q quit · j/k navigate · Tab · / filter · [{follow}] follow · [{meta}] meta · [{sidebar}] sidebar"
             )
         }
         Mode::Detail => " j/k scroll · u/d page · g/G · R raw · Esc close".to_string(),
@@ -459,7 +495,7 @@ fn render_filter_overlay(f: &mut Frame, app: &AppState, area: Rect) {
     let y = area.y + area.height.saturating_sub(h + 1);
     let rect = Rect { x, y, width: w, height: h };
     f.render_widget(Clear, rect);
-    let block = Block::default().borders(Borders::ALL).title(" Filter ");
+    let block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).title(" Filter ");
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let p = Paragraph::new(Line::from(vec![
@@ -473,12 +509,12 @@ fn render_filter_overlay(f: &mut Frame, app: &AppState, area: Rect) {
 
 fn render_help_modal(f: &mut Frame, area: Rect) {
     let w = std::cmp::min(area.width.saturating_sub(8), 58);
-    let h: u16 = 22;
+    let h: u16 = 23;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let rect = Rect { x, y, width: w, height: h };
     f.render_widget(Clear, rect);
-    let block = Block::default().borders(Borders::ALL).title(" Help  [? / Esc to close] ");
+    let block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).title(" Help  [? / Esc to close] ");
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -489,6 +525,7 @@ fn render_help_modal(f: &mut Frame, area: Rect) {
         Line::from(vec![Span::styled("  j / k / ↑ / ↓  ", dim), Span::raw("Move up / down")]),
         Line::from(vec![Span::styled("  h / l / ← / →  ", dim), Span::raw("Step out / in (l on a session = focus events)")]),
         Line::from(vec![Span::styled("  Tab             ", dim), Span::raw("Switch focus sidebar ↔ events")]),
+        Line::from(vec![Span::styled("  b               ", dim), Span::raw("Toggle sidebar")]),
         Line::from(vec![Span::styled("  g / G           ", dim), Span::raw("Top / bottom")]),
         Line::from(Span::raw("")),
         Line::from(Span::styled("Actions", head)),
@@ -523,6 +560,7 @@ fn render_delete_confirm_modal(f: &mut Frame, store: &Store, area: Rect) {
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title(" Delete Closed Sessions ");
     let inner = block.inner(rect);
     f.render_widget(block, rect);
@@ -560,7 +598,7 @@ fn render_detail_modal(f: &mut Frame, store: &Store, app: &mut AppState, area: R
         DetailView::Pretty => " Detail  [Esc close · j/k scroll · R raw] ",
         DetailView::Raw => " Detail (raw)  [Esc close · j/k scroll · R back] ",
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).title(title);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 

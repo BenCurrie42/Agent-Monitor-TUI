@@ -75,6 +75,8 @@ pub struct AppState {
     pub filter_input: String,
     /// Vertical scroll offset for the detail modal (in lines).
     pub detail_scroll: u16,
+    /// Sidebar manually collapsed by the user (also auto-collapsed when width < 100).
+    pub sidebar_collapsed: bool,
 }
 
 impl AppState {
@@ -94,6 +96,7 @@ impl AppState {
             filter: String::new(),
             filter_input: String::new(),
             detail_scroll: 0,
+            sidebar_collapsed: false,
         }
     }
 
@@ -187,6 +190,12 @@ impl AppState {
             KeyCode::Char('/') => {
                 self.mode = Mode::Filter;
                 self.filter_input = self.filter.clone();
+            }
+            KeyCode::Char('b') => {
+                self.sidebar_collapsed = !self.sidebar_collapsed;
+                if self.sidebar_collapsed {
+                    self.focus = Focus::Stream;
+                }
             }
             KeyCode::Char('f') => self.follow = !self.follow,
             KeyCode::Char('v') => {
