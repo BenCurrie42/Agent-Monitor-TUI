@@ -95,6 +95,9 @@ pub struct Session {
     pub loaded: bool,
     pub sidechain_event_count: usize,
     pub is_background: bool,
+    /// Actual working directory from the first user event's `cwd` field.
+    /// More reliable than decode_slug for projects whose names contain hyphens.
+    pub cwd: Option<String>,
     /// tool_use id → (event_idx, block_idx) for the originating tool_use block.
     pub tool_use_index: HashMap<String, (usize, usize)>,
     /// tool_use id → (event_idx, result_idx) for the tool_result that replied to it.
@@ -125,6 +128,7 @@ impl Session {
             loaded: false,
             sidechain_event_count: 0,
             is_background: false,
+            cwd: None,
             tool_use_index: HashMap::new(),
             tool_result_index: HashMap::new(),
             last_input_tokens: None,

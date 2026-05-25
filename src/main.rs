@@ -1,6 +1,7 @@
 mod app;
 mod data;
 mod store;
+mod theme;
 mod ui;
 mod watcher;
 
@@ -20,7 +21,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::app::{AppEvent, AppState};
+use crate::app::{AppEvent, AppState, Mode};
 use crate::store::Store;
 use crate::watcher::spawn_watcher;
 
@@ -163,6 +164,7 @@ fn run(
     terminal.draw(|f| ui::render(f, &store, &mut app))?;
 
     let mut last_draw = Instant::now();
+    let mut last_mode = app.mode;
 
     loop {
         let dirty;
@@ -196,6 +198,14 @@ fn run(
         // Coalesce: avoid drawing more than ~60fps
         if dirty && last_draw.elapsed() >= Duration::from_millis(16) {
             app.resolve_selection(&mut store);
+            // Force a full repaint when leaving an overlay mode (Detail, Filter,
+            // Help, DeleteConfirm). Without this, ratatui's buffer diff can leave
+            // residual cells from the prior modal — most visibly when closing
+            // the detail modal whose content included syntax-highlighted code.
+            if last_mode != app.mode && last_mode != Mode::Normal {
+                terminal.clear().ok();
+            }
+            last_mode = app.mode;
             terminal.draw(|f| ui::render(f, &store, &mut app))?;
             last_draw = Instant::now();
         }
