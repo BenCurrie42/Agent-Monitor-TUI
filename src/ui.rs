@@ -39,8 +39,8 @@ pub fn render(f: &mut Frame, store: &Store, app: &mut AppState) {
             "Terminal too small. Minimum: 80×20. Current: {}×{}",
             area.width, area.height
         );
-        let box_w = (msg.chars().count() as u16 + 4).min(area.width.max(4));
-        let box_h = 3u16.min(area.height.max(3));
+        let box_w = (msg.chars().count() as u16 + 4).min(area.width);
+        let box_h = 3u16.min(area.height);
         let x = area.width.saturating_sub(box_w) / 2;
         let y = area.height.saturating_sub(box_h) / 2;
         let centered = Rect::new(x, y, box_w, box_h);
@@ -1189,8 +1189,9 @@ fn extend_highlighted(out: &mut Vec<Line<'static>>, content: &str, path: &str) {
                     .into_iter()
                     .filter_map(|(style, text)| {
                         let cleaned: String = text
+                            .trim_end_matches(['\r', '\n'])
                             .chars()
-                            .filter(|c| !c.is_control())
+                            .map(|c| if c.is_control() { ' ' } else { c })
                             .collect();
                         if cleaned.is_empty() {
                             return None;
@@ -1206,7 +1207,10 @@ fn extend_highlighted(out: &mut Vec<Line<'static>>, content: &str, path: &str) {
             }
             Err(_) => out.push(Line::raw(
                 line.chars()
-                    .filter(|c| !c.is_control())
+                    .collect::<String>()
+                    .trim_end_matches(['\r', '\n'])
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
                     .collect::<String>(),
             )),
         }
@@ -1334,10 +1338,13 @@ fn summarize_block(b: &AssistantBlock, project_root: &str) -> Vec<Span<'static>>
 /// If it's outside (or project_root is empty), return the full absolute path.
 /// Either way, middle-truncate if the result exceeds 50 chars.
 fn simplify_path(raw: &str, project_root: &str) -> String {
-    let s = if !project_root.is_empty() && raw.starts_with(project_root) {
-        raw[project_root.len()..].trim_start_matches('/').to_string()
-    } else {
+    let s = if project_root.is_empty() {
         raw.to_string()
+    } else {
+        std::path::Path::new(raw)
+            .strip_prefix(project_root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| raw.to_string())
     };
     const MAX: usize = 50;
     let chars: Vec<char> = s.chars().collect();
@@ -1528,4 +1535,3 @@ fn format_count(n: u64) -> String {
         n.to_string()
     }
 }
-
