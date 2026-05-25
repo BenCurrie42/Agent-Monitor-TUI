@@ -412,6 +412,14 @@ fn jsonl_ids_for(path: &Path) -> Option<(String, String)> {
     Some((slug, stem))
 }
 
+fn extract_cwd(line: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct CwdOnly {
+        cwd: Option<String>,
+    }
+    serde_json::from_str::<CwdOnly>(line).ok().and_then(|r| r.cwd)
+}
+
 fn metadata_scan_session(session: &mut Session) {
     let path = &session.file;
     let Ok(file) = File::open(path) else { return };
@@ -438,6 +446,11 @@ fn metadata_scan_session(session: &mut Session) {
     let head_str = String::from_utf8_lossy(&head_buf);
     let mut found_user = false;
     for line in head_str.lines() {
+        if session.cwd.is_none() {
+            if let Some(cwd) = extract_cwd(line) {
+                session.cwd = Some(cwd);
+            }
+        }
         if let Some(rec) = parse_line(line, 0) {
             if session.started.is_none() {
                 session.started = rec.timestamp;

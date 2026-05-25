@@ -199,9 +199,28 @@ impl AppState {
             }
             KeyCode::Char('f') => self.follow = !self.follow,
             KeyCode::Char('v') => {
+                // Remember the event under the cursor and its visual row within the
+                // viewport, so we can restore both after the item list changes size.
+                let anchor = self.selected_session.as_ref()
+                    .and_then(|sid| store.sessions.get(sid))
+                    .and_then(|s| {
+                        let items = stream_items(s, &self.filter, self.show_meta);
+                        let cur = self.stream_cursor.min(items.len().saturating_sub(1));
+                        let visual_row = cur.saturating_sub(self.stream_viewport);
+                        items.get(cur).map(|it| (it.event_idx, visual_row))
+                    });
                 self.show_meta = !self.show_meta;
-                self.stream_cursor = 0;
-                self.stream_viewport = 0;
+                if let Some((event_idx, visual_row)) = anchor {
+                    if let Some(s) = self.selected_session.as_ref().and_then(|sid| store.sessions.get(sid)) {
+                        let new_items = stream_items(s, &self.filter, self.show_meta);
+                        let new_cursor = new_items.iter()
+                            .position(|it| it.event_idx == event_idx)
+                            .unwrap_or_else(|| new_items.len().saturating_sub(1));
+                        self.stream_cursor = new_cursor;
+                        // Restore the cursor to the same visual row it occupied before.
+                        self.stream_viewport = new_cursor.saturating_sub(visual_row);
+                    }
+                }
             }
             KeyCode::Enter => match self.focus {
                 Focus::Sidebar => {
@@ -405,8 +424,8 @@ impl AppState {
                 self.selected_session = Some(session_id.clone());
                 if changed {
                     let _ = store.ensure_loaded(session_id);
-                    self.stream_cursor = 0;
-                    self.stream_viewport = 0;
+                    self.stream_cursor = usize::MAX;
+                    self.stream_viewport = usize::MAX;
                 }
             }
             SidebarRow::ClosedHeader { .. }
@@ -542,8 +561,8 @@ impl AppState {
                 self.selected_session = Some(session_id.clone());
                 if changed {
                     let _ = store.ensure_loaded(session_id);
-                    self.stream_cursor = 0;
-                    self.stream_viewport = 0;
+                    self.stream_cursor = usize::MAX;
+                    self.stream_viewport = usize::MAX;
                 }
             }
             SidebarRow::Project { slug, .. } => {

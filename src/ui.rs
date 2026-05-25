@@ -45,7 +45,7 @@ pub fn render(f: &mut Frame, store: &Store, app: &mut AppState) {
     f.render_widget(Clear, area);
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Min(1), Constraint::Length(1)])
+        .constraints([Constraint::Length(5), Constraint::Min(1), Constraint::Length(1)])
         .split(area);
 
     let collapsed = (app.sidebar_collapsed || area.width < 100) && app.focus != Focus::Sidebar;
@@ -205,22 +205,11 @@ fn render_sidebar(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
         }
     }
 
-    let title = if app.focus == Focus::Sidebar {
-        " Sessions  [Tab→stream] "
-    } else {
-        " Sessions "
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(border_style(app.focus == Focus::Sidebar))
-        .title(title);
     let mut state = ListState::default();
     let max = rows.len().saturating_sub(1);
     let cursor = app.sidebar_cursor.min(max);
     state.select(if rows.is_empty() { None } else { Some(cursor) });
     let list = List::new(items)
-        .block(block)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_widget(Clear, area);
     f.render_stateful_widget(list, area, &mut state);
@@ -228,12 +217,16 @@ fn render_sidebar(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
 
 fn render_session_info(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
     let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(" Session Info ");
-    let inner = block.inner(area);
+        .borders(Borders::BOTTOM)
+        .border_style(Style::default().fg(Color::DarkGray));
     f.render_widget(Clear, area);
     f.render_widget(block, area);
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(1),
+    };
 
     let session = app
         .selected_session
@@ -345,9 +338,9 @@ fn session_info_lines(s: &Session) -> Vec<Line<'_>> {
         };
         Line::from(vec![
             Span::styled("CTX ", label),
-            Span::styled(format!("[{bar}]"), Style::default().fg(bar_color)),
+            Span::styled(bar, Style::default().fg(bar_color)),
             Span::raw(format!(
-                " {pct}% ({} / {})",
+                " {pct}%  {} / {}",
                 format_count(last_input),
                 format_count(limit)
             )),
@@ -470,22 +463,54 @@ fn is_error_item(session: &Session, item: &StreamItem) -> bool {
 
 fn render_statusline(f: &mut Frame, app: &AppState, area: Rect) {
     f.render_widget(Clear, area);
-    let hints = match app.mode {
-        Mode::Normal | Mode::Help | Mode::DeleteConfirm => {
-            let follow = if app.follow { "F" } else { "f" };
-            let meta = if app.show_meta { "V" } else { "v" };
-            let sidebar = if app.sidebar_collapsed { "B" } else { "b" };
-            format!(
-                " ? help · q quit · j/k navigate · Tab · / filter · [{follow}] follow · [{meta}] meta · [{sidebar}] sidebar"
-            )
-        }
-        Mode::Detail => " j/k scroll · u/d page · g/G · R raw · Esc close".to_string(),
-        Mode::Filter => " type to filter · Enter apply · Esc cancel".to_string(),
+
+    let key_st = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let brk_st = Style::default().fg(Color::DarkGray);
+    let lbl_st = Style::default().fg(Color::DarkGray);
+
+    let kc = |spans: &mut Vec<Span<'static>>, key: &'static str, label: &'static str| {
+        spans.push(Span::styled("[", brk_st));
+        spans.push(Span::styled(key, key_st));
+        spans.push(Span::styled("] ", brk_st));
+        spans.push(Span::styled(label, lbl_st));
+        spans.push(Span::styled("  ", lbl_st));
     };
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(hints, Style::default().fg(Color::DarkGray)))),
-        area,
-    );
+
+    let spans: Vec<Span<'static>> = match app.mode {
+        Mode::Normal | Mode::Help | Mode::DeleteConfirm => {
+            let follow_key: &'static str = if app.follow { "F" } else { "f" };
+            let meta_key: &'static str = if app.show_meta { "V" } else { "v" };
+            let sidebar_key: &'static str = if app.sidebar_collapsed { "B" } else { "b" };
+            let mut s = vec![Span::raw(" ")];
+            kc(&mut s, "?", "Help");
+            kc(&mut s, "q", "Quit");
+            kc(&mut s, "j/k", "Navigate");
+            kc(&mut s, "Tab", "Focus");
+            kc(&mut s, "/", "Filter");
+            kc(&mut s, follow_key, "Follow");
+            kc(&mut s, meta_key, "Meta");
+            kc(&mut s, sidebar_key, "Sidebar");
+            s
+        }
+        Mode::Detail => {
+            let mut s = vec![Span::raw(" ")];
+            kc(&mut s, "j/k", "Scroll");
+            kc(&mut s, "u/d", "Page");
+            kc(&mut s, "g/G", "Top/Bot");
+            kc(&mut s, "R", "Raw");
+            kc(&mut s, "Esc", "Close");
+            s
+        }
+        Mode::Filter => {
+            let mut s = vec![Span::raw(" ")];
+            s.push(Span::styled("Type to filter  ", lbl_st));
+            kc(&mut s, "Enter", "Apply");
+            kc(&mut s, "Esc", "Cancel");
+            s
+        }
+    };
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_filter_overlay(f: &mut Frame, app: &AppState, area: Rect) {
@@ -824,9 +849,10 @@ fn render_tool_use(
     name: &str,
     input: &Value,
 ) {
+    let project_root = session.cwd.as_deref().unwrap_or("");
     out.push(header_line(&format!("TOOL · {name}"), Color::Cyan));
     out.push(Line::raw(""));
-    let command_lines = render_tool_command(name, input);
+    let command_lines = render_tool_command(name, input, &project_root);
     out.extend(command_lines);
     out.push(Line::raw(""));
 
@@ -860,7 +886,7 @@ fn render_tool_use(
     )));
 }
 
-fn render_tool_command(name: &str, input: &Value) -> Vec<Line<'static>> {
+fn render_tool_command(name: &str, input: &Value, project_root: &str) -> Vec<Line<'static>> {
     let str_field = |k: &str| {
         input
             .get(k)
@@ -885,7 +911,7 @@ fn render_tool_command(name: &str, input: &Value) -> Vec<Line<'static>> {
             out
         }
         "Read" => {
-            let path = str_field("file_path");
+            let path = simplify_path(&str_field("file_path"), project_root);
             let mut s = format!("Read {path}");
             let off = input.get("offset").and_then(|v| v.as_u64());
             let lim = input.get("limit").and_then(|v| v.as_u64());
@@ -899,7 +925,7 @@ fn render_tool_command(name: &str, input: &Value) -> Vec<Line<'static>> {
             vec![Line::raw(s)]
         }
         "Write" => {
-            let path = str_field("file_path");
+            let path = simplify_path(&str_field("file_path"), project_root);
             let content = str_field("content");
             let mut out = vec![Line::raw(format!("Write {path}"))];
             out.push(Line::raw(""));
@@ -908,7 +934,7 @@ fn render_tool_command(name: &str, input: &Value) -> Vec<Line<'static>> {
             out
         }
         "Edit" => {
-            let path = str_field("file_path");
+            let path = simplify_path(&str_field("file_path"), project_root);
             let old = str_field("old_string");
             let new = str_field("new_string");
             let mut out = vec![Line::raw(format!("Edit {path}"))];
@@ -1104,32 +1130,35 @@ fn summarize_item(session: &Session, item: &StreamItem) -> Line<'static> {
         ));
     }
 
+    let project_root = session.cwd.as_deref().unwrap_or("");
     match (&rec.event, item.sub_idx) {
         (Event::Assistant { blocks, .. }, Some(b)) => {
             if let Some(blk) = blocks.get(b) {
-                spans.extend(summarize_block(blk));
+                spans.extend(summarize_block(blk, project_root));
             }
         }
         (Event::User(UserContent::ToolResults(rs)), Some(r)) => {
             if let Some(tr) = rs.get(r) {
-                let color = if tr.is_error { Color::Red } else { Color::DarkGray };
-                spans.push(Span::styled("↩     ", Style::default().fg(color)));
+                let (label, color) = if tr.is_error {
+                    ("[ERR]  ", Color::Red)
+                } else {
+                    ("[OUT]  ", Color::DarkGray)
+                };
+                spans.push(Span::styled(label, Style::default().fg(color)));
                 spans.push(Span::raw(first_line_owned(&tr.content, 200)));
             }
         }
         (Event::User(UserContent::Text(s)), _) => {
-            spans.push(Span::styled("user  ", Style::default().fg(Color::Blue)));
+            spans.push(Span::styled("[USER] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)));
             spans.push(Span::raw(first_line_owned(s, 200)));
         }
         (Event::System { subtype, body }, _) => {
-            spans.push(Span::styled(
-                format!("sys   {subtype}  "),
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::styled("[SYS]  ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(format!("{subtype}  "), Style::default().fg(Color::DarkGray)));
             spans.push(Span::raw(first_line_owned(&value_preview(body), 200)));
         }
         (Event::AiTitle(t), _) => {
-            spans.push(Span::styled("title ", Style::default().fg(Color::Yellow)));
+            spans.push(Span::styled("[TTL]  ", Style::default().fg(Color::Yellow)));
             spans.push(Span::raw(first_line_owned(t, 200)));
         }
         (Event::LastPrompt(t), _) => {
@@ -1147,59 +1176,71 @@ fn summarize_item(session: &Session, item: &StreamItem) -> Line<'static> {
     Line::from(spans)
 }
 
-fn summarize_block(b: &AssistantBlock) -> Vec<Span<'static>> {
+fn summarize_block(b: &AssistantBlock, project_root: &str) -> Vec<Span<'static>> {
     match b {
         AssistantBlock::Thinking { text } => {
             let n = text.chars().count();
-            let detail = if n > 0 {
-                format!("({n} chars)")
-            } else {
-                "(extended thinking)".to_string()
-            };
+            let detail = if n > 0 { format!("({n} chars)") } else { "(extended thinking)".to_string() };
+            let dim = Style::default().fg(Color::Magenta).add_modifier(Modifier::DIM);
             vec![
-                Span::styled("think ", Style::default().fg(Color::Magenta)),
-                Span::styled(detail, Style::default().fg(Color::Magenta)),
+                Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+                Span::styled("[THK]  ", dim),
+                Span::styled(detail, dim),
             ]
         }
         AssistantBlock::Text { text } => vec![
-            Span::styled("asst  ", Style::default().fg(Color::Green)),
+            Span::styled("[ASST] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw(first_line_owned(text, 200)),
         ],
         AssistantBlock::ToolUse { name, input, .. } => {
-            let summary = tool_summary(name, input);
+            let summary = tool_summary(name, input, project_root);
             vec![
-                Span::styled("tool  ", Style::default().fg(Color::Cyan)),
-                Span::styled(format!("{name}  "), Style::default().fg(Color::Cyan)),
+                Span::styled("[TOOL] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{name}  "), Style::default().fg(Color::Yellow)),
                 Span::raw(summary),
             ]
         }
     }
 }
 
-fn tool_summary(name: &str, input: &Value) -> String {
-    let v = |k: &str| input.get(k).and_then(|x| x.as_str()).unwrap_or("");
-    let pick = match name {
-        "Bash" => v("command"),
-        "Read" | "Write" | "NotebookEdit" => v("file_path"),
-        "Edit" => v("file_path"),
-        "Glob" => v("pattern"),
-        "Grep" => v("pattern"),
+/// If `raw` is inside `project_root`, return the path relative to that root.
+/// If it's outside (or project_root is empty), return the full absolute path.
+/// Either way, middle-truncate if the result exceeds 50 chars.
+fn simplify_path(raw: &str, project_root: &str) -> String {
+    let s = if !project_root.is_empty() && raw.starts_with(project_root) {
+        raw[project_root.len()..].trim_start_matches('/').to_string()
+    } else {
+        raw.to_string()
+    };
+    const MAX: usize = 50;
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() > MAX {
+        let head: String = chars[..18].iter().collect();
+        let tail: String = chars[chars.len().saturating_sub(28)..].iter().collect();
+        format!("{}…{}", head, tail)
+    } else {
+        s
+    }
+}
+
+fn tool_summary(name: &str, input: &Value, project_root: &str) -> String {
+    let v = |k: &str| input.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    match name {
+        "Bash" => first_line_owned(&v("command"), 200),
+        "Read" | "Write" | "NotebookEdit" | "Edit" => simplify_path(&v("file_path"), project_root),
+        "Glob" => first_line_owned(&v("pattern"), 200),
+        "Grep" => first_line_owned(&v("pattern"), 200),
         "WebFetch" | "WebSearch" => {
             let q = v("query");
-            if !q.is_empty() {
-                q
-            } else {
-                v("url")
-            }
+            let url = v("url");
+            first_line_owned(if !q.is_empty() { &q } else { &url }, 200)
         }
-        "Task" | "Agent" => v("description"),
-        _ => "",
-    };
-    if !pick.is_empty() {
-        return first_line_owned(pick, 200);
+        "Task" | "Agent" => first_line_owned(&v("description"), 200),
+        _ => {
+            let s = serde_json::to_string(input).unwrap_or_default();
+            first_line_owned(&s, 200)
+        }
     }
-    let s = serde_json::to_string(input).unwrap_or_default();
-    first_line_owned(&s, 200)
 }
 
 fn value_preview(v: &Value) -> String {
