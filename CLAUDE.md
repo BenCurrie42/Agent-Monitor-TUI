@@ -69,3 +69,23 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 ## Version
 
 0.1.0 — 2026-05-25
+
+## Release checklist — Nix flake sync (IMPORTANT)
+
+The `flake.nix` distributes pre-built release binaries via `fetchurl` instead of building from source. After every release, `flake.nix` **must** be updated or Linux machines will pull the wrong binary.
+
+**When running `/release-docs` or cutting any version:**
+
+1. Check that `version` in `flake.nix` matches the new version in `Cargo.toml`. If they diverge, **flag this to the user before proceeding.**
+2. After the GitHub release workflow completes, fetch the new asset digests:
+   ```
+   gh release view v<VERSION> --repo BenCurrie42/Agent-Monitor-TUI --json assets
+   ```
+3. Convert each hex digest to Nix SRI format:
+   ```
+   echo "<hex>" | xxd -r -p | base64   # prefix result with "sha256-"
+   ```
+4. Update `version` and all three `hash` values in `flake.nix` (aarch64-darwin, x86_64-darwin, x86_64-linux).
+5. Commit `flake.nix` as part of the release commit.
+
+**Divergence check:** grep `version = "` in `flake.nix` and compare to `version` in `Cargo.toml`. If they differ, stop and alert the user.
