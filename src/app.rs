@@ -751,6 +751,8 @@ pub fn is_visible(rec: &EventRecord, show_meta: bool) -> bool {
         | Event::AiTitle(_)
         | Event::LastPrompt(_)
         | Event::PermissionMode(_)
+        | Event::AgentName(_)
+        | Event::Mode(_)
         | Event::FileHistorySnapshot => show_meta,
     }
 }
@@ -858,6 +860,14 @@ pub fn item_matches(session: &Session, item: &StreamItem, needle_lower: &str) ->
         }
         (Event::PermissionMode(m), _) => {
             push(&mut buf, "permission-mode");
+            push(&mut buf, m);
+        }
+        (Event::AgentName(n), _) => {
+            push(&mut buf, "agent-name");
+            push(&mut buf, n);
+        }
+        (Event::Mode(m), _) => {
+            push(&mut buf, "mode");
             push(&mut buf, m);
         }
         (Event::Attachment(_), _) => push(&mut buf, "attachment"),

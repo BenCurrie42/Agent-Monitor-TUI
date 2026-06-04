@@ -291,6 +291,8 @@ fn run_dump(projects_dir: &PathBuf, session_id: Option<String>) -> Result<()> {
                 crate::data::Event::AiTitle(_) => "ai-title",
                 crate::data::Event::LastPrompt(_) => "last-prompt",
                 crate::data::Event::PermissionMode(_) => "permission-mode",
+                crate::data::Event::AgentName(_) => "agent-name",
+                crate::data::Event::Mode(_) => "mode",
                 crate::data::Event::Attachment(_) => "attachment",
                 crate::data::Event::FileHistorySnapshot => "file-history-snapshot",
                 crate::data::Event::Unknown(t) => return_str_pad("?:", t),

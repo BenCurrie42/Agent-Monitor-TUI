@@ -462,6 +462,9 @@ fn metadata_scan_session(session: &mut Session) {
                 Event::AiTitle(t) if !t.trim().is_empty() => {
                     session.title = Some(t.clone());
                 }
+                Event::AgentName(n) if !n.trim().is_empty() => {
+                    session.agent_name = Some(n.clone());
+                }
                 Event::User(UserContent::Text(s)) if !found_user && !s.trim().is_empty() => {
                     let cleaned = first_line(s, 80);
                     if !cleaned.is_empty() {
@@ -680,6 +683,7 @@ fn apply_event_side_effects(session: &mut Session, rec: &EventRecord) {
     }
     match &rec.event {
         Event::AiTitle(t) if !t.trim().is_empty() => session.title = Some(t.clone()),
+        Event::AgentName(n) if !n.trim().is_empty() => session.agent_name = Some(n.clone()),
         Event::User(UserContent::Text(s))
             if session.first_user_line.is_none() && !s.trim().is_empty() =>
         {
