@@ -14,7 +14,7 @@
         # RELEASE SYNC: bump version + hashes after each `cargo release` / GitHub release.
         # Hashes are sha256 SRI (sha256-<base64>) from the GitHub release asset digests.
         # Run: echo "<hex>" | xxd -r -p | base64  to convert GitHub's hex digest.
-        version = "0.1.0";
+        version = "0.1.1";
 
         binaries = {
           "aarch64-darwin" = {

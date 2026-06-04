@@ -1308,6 +1308,39 @@ fn summarize_item(session: &Session, item: &StreamItem) -> Line<'static> {
     Line::from(spans)
 }
 
+fn edit_impact_spans(name: &str, input: &Value) -> Vec<Span<'static>> {
+    let str_val = |k: &str| input.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let (added, removed) = match name {
+        "Edit" => {
+            let old = str_val("old_string");
+            let new = str_val("new_string");
+            (new.lines().count(), old.lines().count())
+        }
+        "Write" => {
+            let content = str_val("content");
+            (content.lines().count(), 0)
+        }
+        _ => return vec![],
+    };
+    if added == 0 && removed == 0 {
+        return vec![];
+    }
+    let impact = added.max(removed);
+    let color = if impact >= 50 {
+        Color::Rgb(210, 80, 60)
+    } else if impact >= 10 {
+        Color::Rgb(200, 155, 45)
+    } else {
+        Color::Rgb(75, 155, 75)
+    };
+    let label = match (added, removed) {
+        (0, r) => format!(" [-{r}]"),
+        (a, 0) => format!(" [+{a}]"),
+        (a, r) => format!(" [+{a}/-{r}]"),
+    };
+    vec![Span::styled(label, Style::default().fg(color))]
+}
+
 fn summarize_block(b: &AssistantBlock, project_root: &str) -> Vec<Span<'static>> {
     match b {
         AssistantBlock::Thinking { text } => {
@@ -1326,11 +1359,13 @@ fn summarize_block(b: &AssistantBlock, project_root: &str) -> Vec<Span<'static>>
         ],
         AssistantBlock::ToolUse { name, input, .. } => {
             let summary = tool_summary(name, input, project_root);
-            vec![
+            let mut spans = vec![
                 Span::styled("[TOOL] ", Style::default().fg(c_milk()).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("{name}  "), Style::default().fg(c_milk())),
                 Span::raw(summary),
-            ]
+            ];
+            spans.extend(edit_impact_spans(name, input));
+            spans
         }
     }
 }

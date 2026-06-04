@@ -68,7 +68,7 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 
 ## Version
 
-0.1.0 — 2026-05-25
+0.1.1 — 2026-06-04
 
 ## Release checklist — Nix flake sync (IMPORTANT)
 

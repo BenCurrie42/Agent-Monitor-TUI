@@ -4,6 +4,11 @@ All notable changes are documented here.
 
 ---
 
+## [0.1.1] — 2026-06-04
+
+### Added
+- **Edit-impact line-count badge** — `Edit` and `Write` tool calls in the event stream now show a color-coded line-delta badge after the tool summary: `[+N]` for `Write` (lines in `content`), `[+A/-R]` for `Edit` (`new_string` vs `old_string` line counts), or `[-R]` when only removing lines. Color scales with impact — green (<10 lines), yellow (10–49), red (≥50). Implemented via new `edit_impact_spans()` in `src/ui.rs`.
+
 ## [0.1.0] — 2026-05-25
 
 ### Added
