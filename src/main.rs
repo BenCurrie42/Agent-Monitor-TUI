@@ -7,7 +7,7 @@ mod watcher;
 
 use std::io;
 use std::panic;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -75,12 +75,8 @@ fn main() -> Result<()> {
     install_panic_hook();
     enable_raw_mode().context("enabling raw mode")?;
     let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        SetTitle("AgentMonitorTUI")
-    )
-    .context("entering alt screen")?;
+    execute!(stdout, EnterAlternateScreen, SetTitle("AgentMonitorTUI"))
+        .context("entering alt screen")?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("creating terminal")?;
 
@@ -97,9 +93,9 @@ fn main() -> Result<()> {
 fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     args: &Args,
-    projects_dir: &PathBuf,
+    projects_dir: &Path,
 ) -> Result<()> {
-    let mut store = Store::new(projects_dir.clone());
+    let mut store = Store::new(projects_dir.to_path_buf());
     store.initial_scan().context("initial projects scan")?;
 
     let mut app = AppState::new(!args.no_follow);
@@ -135,15 +131,14 @@ fn run(
             if let Ok(true) = event::poll(Duration::from_millis(250)) {
                 if let Ok(ev) = event::read() {
                     match ev {
-                        CtEvent::Key(k) if k.kind != KeyEventKind::Release => {
-                            if tx.send(AppEvent::Key(k)).is_err() {
-                                return;
-                            }
+                        CtEvent::Key(k)
+                            if k.kind != KeyEventKind::Release
+                                && tx.send(AppEvent::Key(k)).is_err() =>
+                        {
+                            return;
                         }
-                        CtEvent::Resize(_, _) => {
-                            if tx.send(AppEvent::Resize).is_err() {
-                                return;
-                            }
+                        CtEvent::Resize(_, _) if tx.send(AppEvent::Resize).is_err() => {
+                            return;
                         }
                         _ => {}
                     }
@@ -153,7 +148,7 @@ fn run(
     }
 
     // FS watcher thread
-    let _watcher_handle = spawn_watcher(projects_dir.clone(), tx.clone(), args.debug)
+    let _watcher_handle = spawn_watcher(projects_dir.to_path_buf(), tx.clone(), args.debug)
         .context("starting file watcher")?;
 
     // Render tick (for live-indicator freshness)
@@ -217,8 +212,8 @@ fn default_projects_dir() -> Result<PathBuf> {
     Ok(home.join(".claude").join("projects"))
 }
 
-fn run_dump(projects_dir: &PathBuf, session_id: Option<String>) -> Result<()> {
-    let mut store = Store::new(projects_dir.clone());
+fn run_dump(projects_dir: &Path, session_id: Option<String>) -> Result<()> {
+    let mut store = Store::new(projects_dir.to_path_buf());
     store.initial_scan().context("scan")?;
     println!(
         "{} project(s), {} session(s) in {}",
@@ -227,7 +222,9 @@ fn run_dump(projects_dir: &PathBuf, session_id: Option<String>) -> Result<()> {
         projects_dir.display()
     );
     for slug in store.project_order_by_recency() {
-        let Some(proj) = store.projects.get(&slug) else { continue };
+        let Some(proj) = store.projects.get(&slug) else {
+            continue;
+        };
         let display = crate::data::decode_slug(&slug);
         println!("  {} — {} session(s)", display, proj.sessions.len());
         for sid in proj.sessions.iter().take(5) {
@@ -258,11 +255,7 @@ fn run_dump(projects_dir: &PathBuf, session_id: Option<String>) -> Result<()> {
         let Some(s) = store.sessions.get(&sid) else {
             anyhow::bail!("session {sid} not found");
         };
-        println!(
-            "\n--- session {} ({} events) ---",
-            sid,
-            s.events.len()
-        );
+        println!("\n--- session {} ({} events) ---", sid, s.events.len());
         let totals = &s.usage_totals;
         if totals.has_usage {
             println!(

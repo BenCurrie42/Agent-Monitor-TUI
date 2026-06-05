@@ -2,18 +2,18 @@ use chrono::{DateTime, Utc};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+};
 use ratatui::Frame;
 use serde_json::Value;
 
-use crate::app::{
-    ActiveView, AppState, DetailView, Focus, Mode, SidebarRow, StreamItem,
-};
-use crate::store::is_session_live;
+use crate::app::{ActiveView, AppState, DetailView, Focus, Mode, SidebarRow, StreamItem};
 use crate::data::{
     decode_slug, model_context_window, short_id, AssistantBlock, Event, EventRecord, Session,
     ToolResult, UserContent,
 };
+use crate::store::is_session_live;
 use crate::store::Store;
 use crate::theme::{self, Theme, ThemeVariant};
 
@@ -57,7 +57,11 @@ pub fn render(f: &mut Frame, store: &Store, app: &mut AppState) {
     f.render_widget(Clear, area);
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
         .split(area);
 
     let collapsed = (app.sidebar_collapsed || area.width < 100) && app.focus != Focus::Sidebar;
@@ -74,7 +78,13 @@ pub fn render(f: &mut Frame, store: &Store, app: &mut AppState) {
     if !collapsed {
         render_sidebar(f, store, app, bottom[0]);
     }
-    render_stream(f, store, app, bottom[1], app.focus == Focus::Stream || collapsed);
+    render_stream(
+        f,
+        store,
+        app,
+        bottom[1],
+        app.focus == Focus::Stream || collapsed,
+    );
     render_statusline(f, app, outer[2]);
 
     if app.mode == Mode::Detail {
@@ -129,10 +139,7 @@ fn render_sidebar(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
                 let line = Line::from(vec![
                     Span::raw(format!("{chevron} ")),
                     Span::styled(name, name_style),
-                    Span::styled(
-                        format!("  ({n})"),
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled(format!("  ({n})"), Style::default().fg(Color::DarkGray)),
                 ]);
                 items.push(ListItem::new(line));
             }
@@ -189,7 +196,10 @@ fn render_sidebar(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
                 ]);
                 items.push(ListItem::new(line));
             }
-            SidebarRow::SubAgentHeader { session_count, expanded } => {
+            SidebarRow::SubAgentHeader {
+                session_count,
+                expanded,
+            } => {
                 let chevron = if *expanded { "▼" } else { "▶" };
                 let line = Line::from(vec![
                     Span::raw(format!("{chevron} ")),
@@ -223,8 +233,12 @@ fn render_sidebar(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
     let max = rows.len().saturating_sub(1);
     let cursor = app.sidebar_cursor.min(max);
     state.select(if rows.is_empty() { None } else { Some(cursor) });
-    let list = List::new(items)
-        .highlight_style(Style::default().bg(c_crema()).fg(c_espresso()).add_modifier(Modifier::BOLD));
+    let list = List::new(items).highlight_style(
+        Style::default()
+            .bg(c_crema())
+            .fg(c_espresso())
+            .add_modifier(Modifier::BOLD),
+    );
     f.render_widget(Clear, area);
     f.render_stateful_widget(list, area, &mut state);
 }
@@ -366,12 +380,8 @@ fn session_info_lines(s: &Session) -> Vec<Line<'_>> {
 
 fn model_short_name(model: &str) -> String {
     // Shorten "claude-sonnet-4-6" → "sonnet-4-6", etc.
-    model
-        .strip_prefix("claude-")
-        .unwrap_or(model)
-        .to_string()
+    model.strip_prefix("claude-").unwrap_or(model).to_string()
 }
-
 
 fn render_stream(f: &mut Frame, store: &Store, app: &mut AppState, area: Rect, focused: bool) {
     let mut title = String::from(" Events ");
@@ -424,7 +434,7 @@ fn render_stream(f: &mut Frame, store: &Store, app: &mut AppState, area: Rect, f
     let cursor = if app.follow && total > 0 {
         total.saturating_sub(1)
     } else {
-        app.stream_cursor.min(total.saturating_sub(1).max(0))
+        app.stream_cursor.min(total.saturating_sub(1))
     };
 
     // Viewport invariant: keep cursor visible, otherwise leave viewport alone.
@@ -535,16 +545,27 @@ fn render_filter_overlay(f: &mut Frame, app: &AppState, area: Rect) {
     let w = std::cmp::min(area.width.saturating_sub(4), 60);
     let x = area.x + (area.width - w) / 2;
     let y = area.y + area.height.saturating_sub(h + 1);
-    let rect = Rect { x, y, width: w, height: h };
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
     f.render_widget(Clear, rect);
-    let block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).title(" Filter ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Filter ");
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let p = Paragraph::new(Line::from(vec![
         Span::raw("/ "),
         Span::styled(&app.filter_input, Style::default().fg(c_crema())),
         Span::raw("  "),
-        Span::styled("[Enter apply, Esc cancel]", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "[Enter apply, Esc cancel]",
+            Style::default().fg(Color::DarkGray),
+        ),
     ]));
     f.render_widget(p, inner);
 }
@@ -554,9 +575,17 @@ fn render_help_modal(f: &mut Frame, area: Rect) {
     let h: u16 = 24;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let rect = Rect { x, y, width: w, height: h };
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
     f.render_widget(Clear, rect);
-    let block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).title(" Help  [? / Esc to close] ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Help  [? / Esc to close] ");
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -564,27 +593,78 @@ fn render_help_modal(f: &mut Frame, area: Rect) {
     let head = Style::default().add_modifier(Modifier::BOLD);
     let lines = vec![
         Line::from(Span::styled("Navigation", head)),
-        Line::from(vec![Span::styled("  j / k / ↑ / ↓  ", dim), Span::raw("Move up / down")]),
-        Line::from(vec![Span::styled("  h / l / ← / →  ", dim), Span::raw("Step out / in (l on a session = focus events)")]),
-        Line::from(vec![Span::styled("  Tab             ", dim), Span::raw("Switch focus sidebar ↔ events")]),
-        Line::from(vec![Span::styled("  b               ", dim), Span::raw("Toggle sidebar")]),
-        Line::from(vec![Span::styled("  g / G           ", dim), Span::raw("Top / bottom")]),
+        Line::from(vec![
+            Span::styled("  j / k / ↑ / ↓  ", dim),
+            Span::raw("Move up / down"),
+        ]),
+        Line::from(vec![
+            Span::styled("  h / l / ← / →  ", dim),
+            Span::raw("Step out / in (l on a session = focus events)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Tab             ", dim),
+            Span::raw("Switch focus sidebar ↔ events"),
+        ]),
+        Line::from(vec![
+            Span::styled("  b               ", dim),
+            Span::raw("Toggle sidebar"),
+        ]),
+        Line::from(vec![
+            Span::styled("  g / G           ", dim),
+            Span::raw("Top / bottom"),
+        ]),
         Line::from(Span::raw("")),
         Line::from(Span::styled("Actions", head)),
-        Line::from(vec![Span::styled("  Enter           ", dim), Span::raw("Sidebar: focus events · Events: open detail")]),
-        Line::from(vec![Span::styled("  /               ", dim), Span::raw("Filter events")]),
-        Line::from(vec![Span::styled("  f               ", dim), Span::raw("Toggle follow (auto-scroll)")]),
-        Line::from(vec![Span::styled("  v               ", dim), Span::raw("Toggle meta events")]),
-        Line::from(vec![Span::styled("  s               ", dim), Span::raw("Settings & theme picker")]),
-        Line::from(vec![Span::styled("  D               ", dim), Span::raw("Delete all closed sessions")]),
-        Line::from(vec![Span::styled("  ?               ", dim), Span::raw("This help screen")]),
-        Line::from(vec![Span::styled("  q / Ctrl-C      ", dim), Span::raw("Quit")]),
+        Line::from(vec![
+            Span::styled("  Enter           ", dim),
+            Span::raw("Sidebar: focus events · Events: open detail"),
+        ]),
+        Line::from(vec![
+            Span::styled("  /               ", dim),
+            Span::raw("Filter events"),
+        ]),
+        Line::from(vec![
+            Span::styled("  f               ", dim),
+            Span::raw("Toggle follow (auto-scroll)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  v               ", dim),
+            Span::raw("Toggle meta events"),
+        ]),
+        Line::from(vec![
+            Span::styled("  s               ", dim),
+            Span::raw("Settings & theme picker"),
+        ]),
+        Line::from(vec![
+            Span::styled("  D               ", dim),
+            Span::raw("Delete all closed sessions"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ?               ", dim),
+            Span::raw("This help screen"),
+        ]),
+        Line::from(vec![
+            Span::styled("  q / Ctrl-C      ", dim),
+            Span::raw("Quit"),
+        ]),
         Line::from(Span::raw("")),
         Line::from(Span::styled("Detail modal", head)),
-        Line::from(vec![Span::styled("  j / k           ", dim), Span::raw("Scroll")]),
-        Line::from(vec![Span::styled("  u / d           ", dim), Span::raw("Page up / down")]),
-        Line::from(vec![Span::styled("  R               ", dim), Span::raw("Toggle raw JSON")]),
-        Line::from(vec![Span::styled("  Esc             ", dim), Span::raw("Close")]),
+        Line::from(vec![
+            Span::styled("  j / k           ", dim),
+            Span::raw("Scroll"),
+        ]),
+        Line::from(vec![
+            Span::styled("  u / d           ", dim),
+            Span::raw("Page up / down"),
+        ]),
+        Line::from(vec![
+            Span::styled("  R               ", dim),
+            Span::raw("Toggle raw JSON"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc             ", dim),
+            Span::raw("Close"),
+        ]),
     ];
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -598,7 +678,12 @@ fn render_settings_view(f: &mut Frame, app: &AppState, area: Rect) {
     let h: u16 = 16;
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(h) / 2;
-    let rect = Rect { x, y, width: w, height: h };
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -630,13 +715,17 @@ fn render_settings_view(f: &mut Frame, app: &AppState, area: Rect) {
 
         let cursor_glyph = if is_cursor { " ▶ " } else { "   " };
         let cursor_style = if is_cursor {
-            Style::default().fg(active.highlight).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(active.highlight)
+                .add_modifier(Modifier::BOLD)
         } else {
             dim
         };
 
         let bullet_style = if is_applied {
-            Style::default().fg(t.highlight).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(t.highlight)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(t.highlight)
         };
@@ -673,7 +762,9 @@ fn render_settings_view(f: &mut Frame, app: &AppState, area: Rect) {
     lines.push(Line::raw(""));
     lines.push(Line::raw(""));
 
-    let key_st = Style::default().fg(active.highlight).add_modifier(Modifier::BOLD);
+    let key_st = Style::default()
+        .fg(active.highlight)
+        .add_modifier(Modifier::BOLD);
     let brk = Style::default().fg(Color::DarkGray);
     lines.push(Line::from(vec![
         Span::styled(" [", brk),
@@ -698,7 +789,12 @@ fn render_delete_confirm_modal(f: &mut Frame, store: &Store, area: Rect) {
     let h: u16 = 6;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let rect = Rect { x, y, width: w, height: h };
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -740,20 +836,32 @@ fn render_detail_modal(f: &mut Frame, store: &Store, app: &mut AppState, area: R
         DetailView::Pretty => " Detail  [Esc close · j/k scroll · R raw] ",
         DetailView::Raw => " Detail (raw)  [Esc close · j/k scroll · R back] ",
     };
-    let block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(title);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let Some(sid) = &app.selected_session else { return };
-    let Some(session) = store.sessions.get(sid) else { return };
+    let Some(sid) = &app.selected_session else {
+        return;
+    };
+    let Some(session) = store.sessions.get(sid) else {
+        return;
+    };
     let Some(item) = current_item(session, app) else {
         f.render_widget(
-            Paragraph::new(Span::styled("Nothing here.", Style::default().fg(Color::DarkGray))),
+            Paragraph::new(Span::styled(
+                "Nothing here.",
+                Style::default().fg(Color::DarkGray),
+            )),
             inner,
         );
         return;
     };
-    let Some(rec) = session.events.get(item.event_idx) else { return };
+    let Some(rec) = session.events.get(item.event_idx) else {
+        return;
+    };
 
     let detail_view = app.detail_view;
     let scroll = &mut app.detail_scroll;
@@ -829,7 +937,7 @@ fn visual_line_count_str(text: &str, width: u16) -> u16 {
     text.lines()
         .map(|line| {
             let len = line.chars().count();
-            (len.max(1) + w - 1) / w
+            len.max(1).div_ceil(w)
         })
         .sum::<usize>()
         .min(u16::MAX as usize) as u16
@@ -845,17 +953,13 @@ fn visual_line_count_lines(lines: &[Line], width: u16) -> u16 {
         .iter()
         .map(|line| {
             let len = line.width();
-            (len.max(1) + w - 1) / w
+            len.max(1).div_ceil(w)
         })
         .sum::<usize>()
         .min(u16::MAX as usize) as u16
 }
 
-fn pretty_lines_for(
-    session: &Session,
-    item: &StreamItem,
-    rec: &EventRecord,
-) -> Vec<Line<'static>> {
+fn pretty_lines_for(session: &Session, item: &StreamItem, rec: &EventRecord) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     // Header: timestamp + a short event-type label.
     if let Some(ts) = rec.timestamp {
@@ -894,10 +998,7 @@ fn pretty_lines_for(
             }
         }
         (Event::System { subtype, body }, _) => {
-            out.push(header_line(
-                &format!("SYSTEM · {subtype}"),
-                Color::DarkGray,
-            ));
+            out.push(header_line(&format!("SYSTEM · {subtype}"), Color::DarkGray));
             out.push(Line::raw(""));
             extend_wrapped(&mut out, &value_preview(body));
         }
@@ -979,7 +1080,7 @@ fn render_tool_use(
     let project_root = session.cwd.as_deref().unwrap_or("");
     out.push(header_line(&format!("TOOL · {name}"), c_milk()));
     out.push(Line::raw(""));
-    let command_lines = render_tool_command(name, input, &project_root);
+    let command_lines = render_tool_command(name, input, project_root);
     out.extend(command_lines);
     out.push(Line::raw(""));
 
@@ -988,7 +1089,11 @@ fn render_tool_use(
             if let Event::User(UserContent::ToolResults(rs)) = &rec.event {
                 if let Some(tr) = rs.get(res_idx) {
                     let header = if tr.is_error { "ERROR" } else { "OUTPUT" };
-                    let color = if tr.is_error { Color::Red } else { Color::DarkGray };
+                    let color = if tr.is_error {
+                        Color::Red
+                    } else {
+                        Color::DarkGray
+                    };
                     out.push(header_line(header, color));
                     out.push(Line::raw(""));
                     if tr.content.trim().is_empty() {
@@ -997,7 +1102,10 @@ fn render_tool_use(
                             Style::default().fg(Color::DarkGray),
                         )));
                     } else if name == "Read" {
-                        let fp = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+                        let fp = input
+                            .get("file_path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         extend_highlighted(out, &tr.content, fp);
                     } else {
                         extend_wrapped(out, &tr.content);
@@ -1074,7 +1182,9 @@ fn render_tool_command(name: &str, input: &Value, project_root: &str) -> Vec<Lin
             out.push(Line::raw(""));
             out.push(Line::from(Span::styled(
                 "── to ──",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             )));
             extend_diff_lines(&mut out, &new, Color::Green);
             out
@@ -1082,24 +1192,15 @@ fn render_tool_command(name: &str, input: &Value, project_root: &str) -> Vec<Lin
         "Glob" => vec![Line::raw(format!(
             "Glob {} in {}",
             str_field("pattern"),
-            input
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".")
+            input.get("path").and_then(|v| v.as_str()).unwrap_or(".")
         ))],
         "Grep" => {
             let pat = str_field("pattern");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
             vec![Line::raw(format!("Grep '{pat}' in {path}"))]
         }
-        "WebFetch" => vec![Line::raw(format!(
-            "WebFetch {}",
-            str_field("url")
-        ))],
-        "WebSearch" => vec![Line::raw(format!(
-            "WebSearch \"{}\"",
-            str_field("query")
-        ))],
+        "WebFetch" => vec![Line::raw(format!("WebFetch {}", str_field("url")))],
+        "WebSearch" => vec![Line::raw(format!("WebSearch \"{}\"", str_field("query")))],
         "Task" | "Agent" => {
             let desc = str_field("description");
             let prompt = str_field("prompt");
@@ -1121,8 +1222,16 @@ fn render_tool_command(name: &str, input: &Value, project_root: &str) -> Vec<Lin
 }
 
 fn render_tool_result(out: &mut Vec<Line<'static>>, session: &Session, tr: &ToolResult) {
-    let mut header = if tr.is_error { "TOOL ERROR".to_string() } else { "TOOL RESULT".to_string() };
-    let color = if tr.is_error { Color::Red } else { Color::DarkGray };
+    let mut header = if tr.is_error {
+        "TOOL ERROR".to_string()
+    } else {
+        "TOOL RESULT".to_string()
+    };
+    let color = if tr.is_error {
+        Color::Red
+    } else {
+        Color::DarkGray
+    };
     let mut tool_name: Option<String> = None;
     let mut file_path: Option<String> = None;
     if let Some(tid) = &tr.tool_use_id {
@@ -1132,7 +1241,10 @@ fn render_tool_result(out: &mut Vec<Line<'static>>, session: &Session, tr: &Tool
                     if let Some(AssistantBlock::ToolUse { name, input, .. }) = blocks.get(blk_idx) {
                         header.push_str(&format!(" · {name}"));
                         tool_name = Some(name.clone());
-                        file_path = input.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string());
+                        file_path = input
+                            .get("file_path")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
                     }
                 }
             }
@@ -1266,10 +1378,7 @@ fn summarize_item(session: &Session, item: &StreamItem) -> Line<'static> {
         Style::default().fg(Color::DarkGray),
     ));
     if rec.is_sidechain {
-        spans.push(Span::styled(
-            "└─ ",
-            Style::default().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled("└─ ", Style::default().fg(Color::DarkGray)));
     }
 
     let project_root = session.cwd.as_deref().unwrap_or("");
@@ -1291,12 +1400,23 @@ fn summarize_item(session: &Session, item: &StreamItem) -> Line<'static> {
             }
         }
         (Event::User(UserContent::Text(s)), _) => {
-            spans.push(Span::styled("[USER] ", Style::default().fg(c_unroasted()).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                "[USER] ",
+                Style::default()
+                    .fg(c_unroasted())
+                    .add_modifier(Modifier::BOLD),
+            ));
             spans.push(Span::raw(first_line_owned(s, 200)));
         }
         (Event::System { subtype, body }, _) => {
-            spans.push(Span::styled("[SYS]  ", Style::default().fg(Color::DarkGray)));
-            spans.push(Span::styled(format!("{subtype}  "), Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                "[SYS]  ",
+                Style::default().fg(Color::DarkGray),
+            ));
+            spans.push(Span::styled(
+                format!("{subtype}  "),
+                Style::default().fg(Color::DarkGray),
+            ));
             spans.push(Span::raw(first_line_owned(&value_preview(body), 200)));
         }
         (Event::AiTitle(t), _) => {
@@ -1304,7 +1424,10 @@ fn summarize_item(session: &Session, item: &StreamItem) -> Line<'static> {
             spans.push(Span::raw(first_line_owned(t, 200)));
         }
         (Event::LastPrompt(t), _) => {
-            spans.push(Span::raw(format!("· last-prompt: {}", first_line_owned(t, 200))));
+            spans.push(Span::raw(format!(
+                "· last-prompt: {}",
+                first_line_owned(t, 200)
+            )));
         }
         (Event::PermissionMode(m), _) => {
             spans.push(Span::raw(format!("· permission-mode: {m}")));
@@ -1326,7 +1449,13 @@ fn summarize_item(session: &Session, item: &StreamItem) -> Line<'static> {
 }
 
 fn edit_impact_spans(name: &str, input: &Value) -> Vec<Span<'static>> {
-    let str_val = |k: &str| input.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let str_val = |k: &str| {
+        input
+            .get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     let (added, removed) = match name {
         "Edit" => {
             let old = str_val("old_string");
@@ -1362,7 +1491,11 @@ fn summarize_block(b: &AssistantBlock, project_root: &str) -> Vec<Span<'static>>
     match b {
         AssistantBlock::Thinking { text } => {
             let n = text.chars().count();
-            let detail = if n > 0 { format!("({n} chars)") } else { "(extended thinking)".to_string() };
+            let detail = if n > 0 {
+                format!("({n} chars)")
+            } else {
+                "(extended thinking)".to_string()
+            };
             let dim = Style::default().fg(c_grind());
             vec![
                 Span::styled("│ ", Style::default().fg(c_grind())),
@@ -1371,13 +1504,21 @@ fn summarize_block(b: &AssistantBlock, project_root: &str) -> Vec<Span<'static>>
             ]
         }
         AssistantBlock::Text { text } => vec![
-            Span::styled("[ASST] ", Style::default().fg(c_roasted()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[ASST] ",
+                Style::default()
+                    .fg(c_roasted())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(first_line_owned(text, 200)),
         ],
         AssistantBlock::ToolUse { name, input, .. } => {
             let summary = tool_summary(name, input, project_root);
             let mut spans = vec![
-                Span::styled("[TOOL] ", Style::default().fg(c_milk()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "[TOOL] ",
+                    Style::default().fg(c_milk()).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(format!("{name}  "), Style::default().fg(c_milk())),
                 Span::raw(summary),
             ];
@@ -1411,7 +1552,13 @@ fn simplify_path(raw: &str, project_root: &str) -> String {
 }
 
 fn tool_summary(name: &str, input: &Value, project_root: &str) -> String {
-    let v = |k: &str| input.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let v = |k: &str| {
+        input
+            .get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     match name {
         "Bash" => first_line_owned(&v("command"), 200),
         "Read" | "Write" | "NotebookEdit" | "Edit" => simplify_path(&v("file_path"), project_root),
@@ -1468,10 +1615,7 @@ fn first_line_owned(s: &str, max: usize) -> String {
 /// (e.g. multiple "scraper" dirs) don't collide visually. Falls back to the
 /// leaf if only one segment is available.
 fn project_short_name(display: &str) -> String {
-    let segs: Vec<&str> = display
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segs: Vec<&str> = display.split('/').filter(|s| !s.is_empty()).collect();
     match segs.len() {
         0 => display.to_string(),
         1 => segs[0].to_string(),
@@ -1493,14 +1637,30 @@ fn truncate_line(s: &str, max: usize) -> String {
 // Kept under the historical "coffee" names so call sites don't need to change
 // when a different ThemeVariant is active; each reads the corresponding slot
 // from the currently selected theme.
-fn c_espresso() -> Color { theme::current().border }
-fn c_crema()    -> Color { theme::current().highlight }
-fn c_unroasted()-> Color { theme::current().user_badge }
-fn c_roasted()  -> Color { theme::current().assistant_badge }
-fn c_milk()     -> Color { theme::current().tool_badge }
-fn c_grind()    -> Color { theme::current().thinking }
-fn c_ctx_filled() -> Color { theme::current().ctx_filled }
-fn c_ctx_empty()  -> Color { theme::current().ctx_empty }
+fn c_espresso() -> Color {
+    theme::current().border
+}
+fn c_crema() -> Color {
+    theme::current().highlight
+}
+fn c_unroasted() -> Color {
+    theme::current().user_badge
+}
+fn c_roasted() -> Color {
+    theme::current().assistant_badge
+}
+fn c_milk() -> Color {
+    theme::current().tool_badge
+}
+fn c_grind() -> Color {
+    theme::current().thinking
+}
+fn c_ctx_filled() -> Color {
+    theme::current().ctx_filled
+}
+fn c_ctx_empty() -> Color {
+    theme::current().ctx_empty
+}
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn border_style(focused: bool) -> Style {
