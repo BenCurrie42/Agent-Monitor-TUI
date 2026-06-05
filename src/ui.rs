@@ -916,6 +916,16 @@ fn pretty_lines_for(
             out.push(Line::raw(""));
             extend_wrapped(&mut out, m);
         }
+        (Event::AgentName(n), _) => {
+            out.push(header_line("AGENT NAME", c_crema()));
+            out.push(Line::raw(""));
+            extend_wrapped(&mut out, n);
+        }
+        (Event::Mode(m), _) => {
+            out.push(header_line("MODE", Color::DarkGray));
+            out.push(Line::raw(""));
+            extend_wrapped(&mut out, m);
+        }
         (Event::Attachment(v), _) => {
             out.push(header_line("ATTACHMENT", Color::DarkGray));
             out.push(Line::raw(""));
@@ -1298,6 +1308,13 @@ fn summarize_item(session: &Session, item: &StreamItem) -> Line<'static> {
         }
         (Event::PermissionMode(m), _) => {
             spans.push(Span::raw(format!("· permission-mode: {m}")));
+        }
+        (Event::AgentName(n), _) => {
+            spans.push(Span::styled("[AGT]  ", Style::default().fg(c_crema())));
+            spans.push(Span::raw(first_line_owned(n, 200)));
+        }
+        (Event::Mode(m), _) => {
+            spans.push(Span::raw(format!("· mode: {m}")));
         }
         (Event::Attachment(_), _) => spans.push(Span::raw("· attachment")),
         (Event::FileHistorySnapshot, _) => spans.push(Span::raw("· file-history-snapshot")),

@@ -73,6 +73,9 @@ pub struct Session {
     pub file: PathBuf,
     pub title: Option<String>,
     pub first_user_line: Option<String>,
+    /// Sub-agent display name from the most recent `agent-name` record. Used as
+    /// a label fallback for sub-agents that have no AI title or first user line.
+    pub agent_name: Option<String>,
     pub started: Option<DateTime<Utc>>,
     pub last_event: Option<DateTime<Utc>>,
     pub last_mtime: Option<DateTime<Utc>>,
@@ -114,6 +117,7 @@ impl Session {
             file,
             title: None,
             first_user_line: None,
+            agent_name: None,
             started: None,
             last_event: None,
             last_mtime: None,
@@ -141,6 +145,9 @@ impl Session {
         }
         if let Some(p) = &self.first_user_line {
             return p.clone();
+        }
+        if let Some(n) = &self.agent_name {
+            return n.clone();
         }
         short_id(&self.id)
     }
@@ -269,6 +276,11 @@ pub enum Event {
     AiTitle(String),
     LastPrompt(String),
     PermissionMode(String),
+    /// Sub-agent display name (`agent-name` record). Used to label sub-agents
+    /// that have no AI title or user-typed first line.
+    AgentName(String),
+    /// Session interaction mode (`mode` record), e.g. "normal", "plan".
+    Mode(String),
     FileHistorySnapshot,
     Unknown(String),
 }
@@ -337,6 +349,10 @@ struct RawRecord {
     last_prompt: Option<String>,
     #[serde(default, rename = "permissionMode")]
     permission_mode: Option<String>,
+    #[serde(default, rename = "agentName")]
+    agent_name: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
     #[serde(default)]
     attachment: Option<Value>,
 }
@@ -376,6 +392,8 @@ pub fn parse_line(line: &str, file_offset: u64) -> Option<EventRecord> {
         "ai-title" => Event::AiTitle(raw.ai_title.unwrap_or_default()),
         "last-prompt" => Event::LastPrompt(raw.last_prompt.unwrap_or_default()),
         "permission-mode" => Event::PermissionMode(raw.permission_mode.unwrap_or_default()),
+        "agent-name" => Event::AgentName(raw.agent_name.unwrap_or_default()),
+        "mode" => Event::Mode(raw.mode.unwrap_or_default()),
         "file-history-snapshot" => Event::FileHistorySnapshot,
         other if other.is_empty() => Event::Unknown(String::from("?")),
         other => Event::Unknown(other.to_string()),
@@ -597,6 +615,39 @@ mod tests {
         assert_eq!(u.output_tokens, Some(20));
         assert_eq!(u.cache_read_input_tokens, Some(5));
         assert_eq!(r.model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn parse_agent_name_line() {
+        let line = r#"{"type":"agent-name","agentName":"sidebar-collapse-min-size-rounded","sessionId":"s1"}"#;
+        let r = parse_line(line, 0).unwrap();
+        match r.event {
+            Event::AgentName(n) => assert_eq!(n, "sidebar-collapse-min-size-rounded"),
+            _ => panic!("expected agent-name"),
+        }
+    }
+
+    #[test]
+    fn parse_mode_line() {
+        let line = r#"{"type":"mode","mode":"normal","sessionId":"s1"}"#;
+        let r = parse_line(line, 0).unwrap();
+        match r.event {
+            Event::Mode(m) => assert_eq!(m, "normal"),
+            _ => panic!("expected mode"),
+        }
+    }
+
+    #[test]
+    fn agent_name_used_as_label_fallback() {
+        let mut s = Session::new("abcd1234efgh".into(), "slug".into(), PathBuf::from("/tmp/x"));
+        // No title, no first user line → falls back to short_id.
+        assert_eq!(s.display_label(), "abcd1234");
+        s.agent_name = Some("my-subagent".into());
+        // agent_name takes precedence over the short id.
+        assert_eq!(s.display_label(), "my-subagent");
+        // ...but an explicit title still wins.
+        s.title = Some("Real Title".into());
+        assert_eq!(s.display_label(), "Real Title");
     }
 
     #[test]
