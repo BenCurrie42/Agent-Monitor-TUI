@@ -4,6 +4,12 @@ All notable changes are documented here.
 
 ---
 
+## [0.1.2] — 2026-06-05
+
+### Added
+- **`agent-name` and `mode` record parsing** — JSONL `agent-name` and `mode` records are now parsed into `Event::AgentName` / `Event::Mode` (`src/data.rs`) instead of falling through to `Event::Unknown` (previously displayed as "unknown"). Both render in the detail modal (`AGENT NAME` / `MODE` headers) and the event-stream summary (`[AGT]` badge for agent-name, `· mode: <m>` for mode), and are matchable in the filter (`src/ui.rs`, `src/app.rs`).
+- **Sub-agent label fallback** — sub-agent sessions with no AI title or user-typed first line now fall back to their `agent-name` value via the new `Session.agent_name` field, instead of showing a short session id. Populated during both the metadata scan and incremental tail load (`src/store.rs`).
+
 ## [0.1.1] — 2026-06-04
 
 ### Added

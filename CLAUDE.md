@@ -20,7 +20,7 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 - **`AppState`** (`app.rs`) — all mutable UI state: focus, mode, follow, cursors, viewport, filter, expanded set, `sidebar_collapsed`, `active_view` (`Main`/`Settings`), `selected_theme`, `theme_menu_index`, `sidebar_rows_cache`, `stream_cache` (per-frame `RefCell` cache keyed on session_id + events.len + show_meta)
 - **`Store`** (`store.rs`) — `BTreeMap<String, Project>` + `HashMap<String, Session>`
 - **`EventRecord`** (`data.rs`) — parsed JSONL line: `Event` enum + timestamp, model, sidechain flag, `session_kind`, byte offset
-- **`Session`** (`data.rs`) — includes `is_background` (set when `sessionKind == "bg"`), `process_open` (set via lsof polling), `project_has_claude` (any claude CWD matches this project), `process_ever_open` (latches true once seen), `process_closed_at` (timestamp of last close), `exit_observed` (set on `/exit`/`/quit` command), `last_input_tokens` (sum of all input-side tokens from most recent assistant turn — represents current context size), `cwd` (actual working directory from first JSONL line — used for path simplification)
+- **`Session`** (`data.rs`) — includes `agent_name` (sub-agent display name from the most recent `agent-name` record; used as a `display_label` fallback when there is no title or first user line), `is_background` (set when `sessionKind == "bg"`), `process_open` (set via lsof polling), `project_has_claude` (any claude CWD matches this project), `process_ever_open` (latches true once seen), `process_closed_at` (timestamp of last close), `exit_observed` (set on `/exit`/`/quit` command), `last_input_tokens` (sum of all input-side tokens from most recent assistant turn — represents current context size), `cwd` (actual working directory from first JSONL line — used for path simplification)
 - **`FsEvent`** (`store.rs`) — `Created | Modified | Removed(PathBuf)` dispatched from the watcher thread
 
 ## Data flow
@@ -68,7 +68,7 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 
 ## Version
 
-0.1.1 — 2026-06-04
+0.1.2 — 2026-06-05
 
 ## Release checklist — Nix flake sync (IMPORTANT)
 
