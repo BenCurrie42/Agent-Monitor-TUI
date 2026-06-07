@@ -187,8 +187,7 @@ impl UsageTotals {
                 + (u.output_tokens.unwrap_or(0) as f64) / 1_000_000.0 * price.output
                 + (u.cache_creation_input_tokens.unwrap_or(0) as f64) / 1_000_000.0
                     * price.cache_write
-                + (u.cache_read_input_tokens.unwrap_or(0) as f64) / 1_000_000.0
-                    * price.cache_read;
+                + (u.cache_read_input_tokens.unwrap_or(0) as f64) / 1_000_000.0 * price.cache_read;
         } else if model.is_some() {
             self.unknown_model = true;
         }
@@ -259,7 +258,6 @@ pub struct EventRecord {
     pub file_offset: u64,
     pub file_len: u64,
 }
-
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -395,7 +393,7 @@ pub fn parse_line(line: &str, file_offset: u64) -> Option<EventRecord> {
         "agent-name" => Event::AgentName(raw.agent_name.unwrap_or_default()),
         "mode" => Event::Mode(raw.mode.unwrap_or_default()),
         "file-history-snapshot" => Event::FileHistorySnapshot,
-        other if other.is_empty() => Event::Unknown(String::from("?")),
+        "" => Event::Unknown(String::from("?")),
         other => Event::Unknown(other.to_string()),
     };
 
@@ -555,7 +553,7 @@ fn truncate(s: &str, max: usize) -> String {
         }
         let mut out = String::with_capacity(end + 3);
         out.push_str(&s[..end]);
-        out.push_str("…");
+        out.push('…');
         out
     }
 }
@@ -639,7 +637,11 @@ mod tests {
 
     #[test]
     fn agent_name_used_as_label_fallback() {
-        let mut s = Session::new("abcd1234efgh".into(), "slug".into(), PathBuf::from("/tmp/x"));
+        let mut s = Session::new(
+            "abcd1234efgh".into(),
+            "slug".into(),
+            PathBuf::from("/tmp/x"),
+        );
         // No title, no first user line → falls back to short_id.
         assert_eq!(s.display_label(), "abcd1234");
         s.agent_name = Some("my-subagent".into());

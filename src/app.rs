@@ -215,7 +215,9 @@ impl AppState {
             let rows = sidebar_rows(store, &self.expanded);
             self.sidebar_cursor = rows
                 .iter()
-                .position(|r| matches!(r, SidebarRow::Session { session_id, .. } if session_id == &sid))
+                .position(
+                    |r| matches!(r, SidebarRow::Session { session_id, .. } if session_id == &sid),
+                )
                 .unwrap_or(0);
             return;
         }
@@ -418,10 +420,8 @@ impl AppState {
                     }
                 }
             },
-            KeyCode::Right | KeyCode::Char('l') => {
-                if self.focus == Focus::Sidebar {
-                    self.handle_sidebar_l(store);
-                }
+            KeyCode::Right | KeyCode::Char('l') if self.focus == Focus::Sidebar => {
+                self.handle_sidebar_l(store);
             }
             KeyCode::Left | KeyCode::Char('h') => match self.focus {
                 Focus::Sidebar => self.handle_sidebar_h(store),

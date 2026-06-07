@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -6,9 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
 
-use crate::data::{
-    parse_line, AssistantBlock, Event, EventRecord, Project, Session, UserContent,
-};
+use crate::data::{parse_line, AssistantBlock, Event, EventRecord, Project, Session, UserContent};
 
 /// Fallback "live" window for sessions we never observed a claude process for.
 /// Only used when neither `process_open` nor `process_ever_open` apply.
@@ -294,7 +293,8 @@ impl Store {
     }
 
     fn re_sort_project(&mut self, slug: &str) {
-        let sessions_clone: HashMap<String, (Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = self
+        type TimePair = (Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+        let sessions_clone: HashMap<String, TimePair> = self
             .sessions
             .iter()
             .map(|(k, v)| (k.clone(), (v.last_event, v.last_mtime)))
@@ -344,7 +344,7 @@ impl Store {
                 .filter(|(_, s)| s.project_slug == *slug)
                 .map(|(id, s)| (id.clone(), s.last_event.or(s.last_mtime)))
                 .collect();
-            ids.sort_by(|a, b| b.1.cmp(&a.1));
+            ids.sort_by_key(|b| Reverse(b.1));
             for (id, _) in ids.into_iter().take(*n) {
                 active_sessions.insert(id);
             }
@@ -417,7 +417,9 @@ fn extract_cwd(line: &str) -> Option<String> {
     struct CwdOnly {
         cwd: Option<String>,
     }
-    serde_json::from_str::<CwdOnly>(line).ok().and_then(|r| r.cwd)
+    serde_json::from_str::<CwdOnly>(line)
+        .ok()
+        .and_then(|r| r.cwd)
 }
 
 fn metadata_scan_session(session: &mut Session) {
@@ -595,8 +597,8 @@ fn is_command_envelope_tag(tag: &str) -> bool {
 }
 
 fn full_load_session(session: &mut Session) -> Result<()> {
-    let file = File::open(&session.file)
-        .with_context(|| format!("opening {}", session.file.display()))?;
+    let file =
+        File::open(&session.file).with_context(|| format!("opening {}", session.file.display()))?;
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
     let reader = BufReader::new(file);
     let mut events = Vec::new();
@@ -626,8 +628,8 @@ fn full_load_session(session: &mut Session) -> Result<()> {
 }
 
 fn tail_load_session(session: &mut Session) -> Result<()> {
-    let mut file = File::open(&session.file)
-        .with_context(|| format!("opening {}", session.file.display()))?;
+    let mut file =
+        File::open(&session.file).with_context(|| format!("opening {}", session.file.display()))?;
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
     if size <= session.byte_offset {
         return Ok(());
@@ -692,21 +694,19 @@ fn apply_event_side_effects(session: &mut Session, rec: &EventRecord) {
                 session.first_user_line = Some(cleaned);
             }
         }
-        Event::Assistant { usage, .. } => {
-            if let Some(u) = usage {
-                let any_nonzero = u.input_tokens.unwrap_or(0) > 0
-                    || u.output_tokens.unwrap_or(0) > 0
-                    || u.cache_creation_input_tokens.unwrap_or(0) > 0
-                    || u.cache_read_input_tokens.unwrap_or(0) > 0;
-                if any_nonzero {
-                    session.usage_totals.add(u, rec.model.as_deref());
-                    // Full context size = all input-side tokens (most are cache hits/writes).
-                    let ctx = u.input_tokens.unwrap_or(0)
-                        + u.cache_creation_input_tokens.unwrap_or(0)
-                        + u.cache_read_input_tokens.unwrap_or(0);
-                    if ctx > 0 {
-                        session.last_input_tokens = Some(ctx);
-                    }
+        Event::Assistant { usage: Some(u), .. } => {
+            let any_nonzero = u.input_tokens.unwrap_or(0) > 0
+                || u.output_tokens.unwrap_or(0) > 0
+                || u.cache_creation_input_tokens.unwrap_or(0) > 0
+                || u.cache_read_input_tokens.unwrap_or(0) > 0;
+            if any_nonzero {
+                session.usage_totals.add(u, rec.model.as_deref());
+                // Full context size = all input-side tokens (most are cache hits/writes).
+                let ctx = u.input_tokens.unwrap_or(0)
+                    + u.cache_creation_input_tokens.unwrap_or(0)
+                    + u.cache_read_input_tokens.unwrap_or(0);
+                if ctx > 0 {
+                    session.last_input_tokens = Some(ctx);
                 }
             }
         }
