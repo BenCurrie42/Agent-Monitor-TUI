@@ -19,15 +19,15 @@
         binaries = {
           "aarch64-darwin" = {
             url = "https://github.com/BenCurrie42/Agent-Monitor-TUI/releases/download/v${version}/agentmonitor-aarch64-apple-darwin";
-            hash = "sha256-VejpVjf8UFNp16enGMhaB4wqFzFJ/Px91i7C7Yl/6wA=";
+            hash = "sha256-wL8MLp9XOkmHdbxHBQInXTcRH8uQ0cDnI7VKobQGg4Q=";
           };
           "x86_64-darwin" = {
             url = "https://github.com/BenCurrie42/Agent-Monitor-TUI/releases/download/v${version}/agentmonitor-x86_64-apple-darwin";
-            hash = "sha256-h6fOHGnajZrSgl528T5LwuyTfIrGNfkEyQlbNe4Iw/M=";
+            hash = "sha256-YulY5UyORTUuXro1RNKD/JaecMcVja7rNiJjMQE8EJk=";
           };
           "x86_64-linux" = {
             url = "https://github.com/BenCurrie42/Agent-Monitor-TUI/releases/download/v${version}/agentmonitor-x86_64-unknown-linux-musl";
-            hash = "sha256-nwunoql6nDdrcpwlBC6Hmn3S/qFHs4Uqg1OFHBc+ECI=";
+            hash = "sha256-4n15Ha5Nvlyn4x3o44dCeraSMMp8GSF7mqC04Fpplb4=";
           };
         };
 
