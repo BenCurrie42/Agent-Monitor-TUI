@@ -10,7 +10,7 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 | `src/app.rs` | `AppState`, keyboard handling, `sidebar_rows`, `stream_items`, filter matching |
 | `src/data.rs` | Data model, JSONL `parse_line`, `UsageTotals`, `ModelPrice`, `model_context_window`, slug decoding |
 | `src/store.rs` | `Store`: project/session maps, initial scan, lazy full load, incremental tail load, FS event handling |
-| `src/theme.rs` | 5-theme color system; `ThemeVariant` enum, `ThemeColors` struct, lock-free `set()`/`current()` API |
+| `src/theme.rs` | 10-theme color system; `ThemeVariant` enum, `ThemeColors` struct, lock-free `set()`/`current()` API |
 | `src/ui.rs` | All `ratatui` rendering: sidebar, header, event stream, detail modal, filter overlay, statusline |
 | `src/watcher.rs` | `notify-debouncer-mini` watcher; maps FS events to `FsEvent` enum |
 | `build.rs` | macOS SDK lib path discovery via `xcrun` (libiconv linker workaround for nix toolchains) |
@@ -68,7 +68,7 @@ A passive, lazydocker-style TUI for monitoring Claude Code sessions. Reads `~/.c
 
 ## Version
 
-0.1.2 — 2026-06-05
+0.1.3 — 2026-06-07
 
 ## Release checklist — Nix flake sync (IMPORTANT)
 

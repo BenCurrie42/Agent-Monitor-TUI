@@ -4,6 +4,19 @@ All notable changes are documented here.
 
 ---
 
+## [0.1.3] — 2026-06-07
+
+### Added
+- **5 new color themes** — Dracula, Gruvbox, Tokyo Night, Solarized, and Paper (Light) expand the theme system from 5 to 10 variants (`src/theme.rs`). New variants occupy indices 5–9 in `as_u8`/`from_u8`; the original 5 keep indices 0–4 and their exact color values. Each new variant has a unique `label()` and a fully-populated `Theme::for_variant` arm built with the `rgb(r, g, b, fallback)` helper and named-color fallbacks. The Settings picker iterates `ThemeVariant::ALL`, so all 10 appear with no bounds changes. 6 new unit tests cover `ALL` length, `as_u8`/`from_u8` round-trip, preserved indices, labels, and populated arms.
+
+### Changed
+- **Repo-wide formatting and lint cleanup** — ran `cargo fmt` and fixed ~14 pre-existing `clippy` errors across `src/app.rs`, `src/data.rs`, `src/main.rs`, `src/store.rs`, `src/ui.rs` (e.g. `&PathBuf` → `&Path`) to satisfy the AGENTS.md quality gates. No behavioral changes; all 18 tests, release build, `clippy -D warnings`, and `fmt --check` pass clean.
+
+### New files
+- `AGENTS.md` — binding project/agent ruleset (quality gates, PRD lifecycle, conventions, agent constraints) for the PRD-driven work loop.
+- `.mcp.json` — MCP server config for the Ralph/PRD scaffolding.
+- `plans/prds/completed/01_more_themes.md` — the completed PRD specifying the 5 additional themes.
+
 ## [0.1.2] — 2026-06-05
 
 ### Added

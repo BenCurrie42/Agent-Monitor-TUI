@@ -69,7 +69,7 @@ In detail view:
 
 Claude Code writes every conversation event to a JSONL file under `~/.claude/projects/<slug>/<session-id>.jsonl`. This tool watches that directory for changes, parses the JSONL on the fly, and streams events into the UI as they arrive.
 
-Sessions are split into **live** (activity in the last 5 minutes, or JSONL file currently held open by a `claude` process), **sub-agents** (background sessions with no user-visible title), and **closed** sections. Token usage, estimated cost (Opus / Sonnet / Haiku), and a **context window pressure gauge** (`CTX [████░░░░░░] 38%`) are shown per session in the header. File content from Read tool calls is **syntax-highlighted** by extension, and `Edit`/`Write` tool calls show a color-coded **line-impact badge** (`[+12/-3]`). Press `s` to open the **Settings** view and pick from 5 color themes; press `b` to collapse the sidebar for a wider event stream.
+Sessions are split into **live** (activity in the last 5 minutes, or JSONL file currently held open by a `claude` process), **sub-agents** (background sessions with no user-visible title), and **closed** sections. Token usage, estimated cost (Opus / Sonnet / Haiku), and a **context window pressure gauge** (`CTX [████░░░░░░] 38%`) are shown per session in the header. File content from Read tool calls is **syntax-highlighted** by extension, and `Edit`/`Write` tool calls show a color-coded **line-impact badge** (`[+12/-3]`). Press `s` to open the **Settings** view and pick from 10 color themes (Coffee, Nordic Frost, Forest Moss, Cyberpunk Neon, Default Dark, Dracula, Gruvbox, Tokyo Night, Solarized, and Paper Light); press `b` to collapse the sidebar for a wider event stream.
 
 ## License
 
