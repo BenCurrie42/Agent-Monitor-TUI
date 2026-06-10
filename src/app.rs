@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::data::{AssistantBlock, Event, EventRecord, Session, UserContent};
+use crate::data::{AssistantBlock, Event, EventRecord, Session, SourceKind, UserContent};
 use crate::store::{is_session_live, FsEvent, Store};
 use crate::theme::{self, ThemeVariant};
 
@@ -18,9 +18,10 @@ pub enum AppEvent {
     Key(KeyEvent),
     Resize,
     Fs(FsEvent),
-    /// One entry per running `claude` process, with duplicates if multiple
-    /// processes share a CWD. Consumed by `Store::apply_open_files`.
-    OpenFiles(Vec<PathBuf>),
+    /// Per-source running-process working dirs (one entry per process, with
+    /// duplicates if multiple processes share a CWD). Consumed by
+    /// `Store::apply_open_files`.
+    OpenFiles(Vec<(SourceKind, Vec<PathBuf>)>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,5 +1,6 @@
 mod app;
 mod data;
+mod sources;
 mod store;
 mod theme;
 mod ui;
@@ -8,6 +9,7 @@ mod watcher;
 use std::io;
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -22,6 +24,8 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::app::{AppEvent, AppState, Mode};
+use crate::data::SourceKind;
+use crate::sources::{ClaudeSource, Source};
 use crate::store::Store;
 use crate::watcher::spawn_watcher;
 
@@ -95,7 +99,12 @@ fn run(
     args: &Args,
     projects_dir: &Path,
 ) -> Result<()> {
-    let mut store = Store::new(projects_dir.to_path_buf());
+    // Build the data sources. Vec-shaped so adding a second source (PRD-07) is
+    // additive; for now it is a single Claude source.
+    let claude: Arc<dyn Source> = Arc::new(ClaudeSource::new(projects_dir.to_path_buf()));
+    let sources: Vec<Arc<dyn Source>> = vec![claude];
+
+    let mut store = Store::new(sources.clone());
     store.initial_scan().context("initial projects scan")?;
 
     let mut app = AppState::new(!args.no_follow);
@@ -111,14 +120,18 @@ fn run(
     let (tx, rx) = unbounded::<AppEvent>();
 
     // Initial open-file check (synchronous, before first render).
-    store.apply_open_files(&claude_open_files());
+    store.apply_open_files(&gather_active_dirs(&sources));
 
-    // Background open-file checker: re-checks every 5s via lsof.
+    // Background open-file checker: re-checks every 1s.
     {
         let tx = tx.clone();
+        let sources = sources.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(1));
-            if tx.send(AppEvent::OpenFiles(claude_open_files())).is_err() {
+            if tx
+                .send(AppEvent::OpenFiles(gather_active_dirs(&sources)))
+                .is_err()
+            {
                 return;
             }
         });
@@ -147,9 +160,13 @@ fn run(
         });
     }
 
-    // FS watcher thread
-    let _watcher_handle = spawn_watcher(projects_dir.to_path_buf(), tx.clone(), args.debug)
-        .context("starting file watcher")?;
+    // FS watcher thread, one per source root.
+    let mut _watcher_handles = Vec::new();
+    for src in &sources {
+        let handle = spawn_watcher(src.root().to_path_buf(), tx.clone(), args.debug)
+            .context("starting file watcher")?;
+        _watcher_handles.push(handle);
+    }
 
     // Render tick (for live-indicator freshness)
     let ticker = tick(Duration::from_millis(500));
@@ -213,7 +230,8 @@ fn default_projects_dir() -> Result<PathBuf> {
 }
 
 fn run_dump(projects_dir: &Path, session_id: Option<String>) -> Result<()> {
-    let mut store = Store::new(projects_dir.to_path_buf());
+    let claude: Arc<dyn Source> = Arc::new(ClaudeSource::new(projects_dir.to_path_buf()));
+    let mut store = Store::new(vec![claude]);
     store.initial_scan().context("scan")?;
     println!(
         "{} project(s), {} session(s) in {}",
@@ -326,25 +344,12 @@ fn resolve_session_id(store: &Store, query: &str) -> Result<String> {
     }
 }
 
-/// Returns one entry per running `claude` process — each is the process's CWD.
-/// Duplicates are preserved so callers can count how many claude processes
-/// share a project. The `-a` flag is critical: without it, lsof ORs the
-/// `-c` and `-d` filters and returns every process on the system.
-fn claude_open_files() -> Vec<PathBuf> {
-    let Ok(out) = std::process::Command::new("lsof")
-        .args(["-a", "-c", "claude", "-d", "cwd", "-F", "n"])
-        .output()
-    else {
-        return Vec::new();
-    };
-    let Ok(stdout) = std::str::from_utf8(&out.stdout) else {
-        return Vec::new();
-    };
-    stdout
-        .lines()
-        .filter_map(|l| l.strip_prefix('n'))
-        .filter(|p| !p.is_empty() && *p != "/")
-        .map(PathBuf::from)
+/// Gather each source's running-process working dirs, tagged by source kind.
+/// Consumed by `Store::apply_open_files` for liveness attribution.
+fn gather_active_dirs(sources: &[Arc<dyn Source>]) -> Vec<(SourceKind, Vec<PathBuf>)> {
+    sources
+        .iter()
+        .map(|src| (src.kind(), src.active_dirs()))
         .collect()
 }
 

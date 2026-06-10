@@ -1,15 +1,17 @@
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
 
-use crate::data::{parse_line, AssistantBlock, Event, EventRecord, Project, Session, UserContent};
+use crate::data::{Project, Session, SourceKind};
+use crate::sources::Source;
 
-/// Fallback "live" window for sessions we never observed a claude process for.
+/// Fallback "live" window for sessions we never observed a driving process for.
 /// Only used when neither `process_open` nor `process_ever_open` apply.
 pub const LIVE_THRESHOLD_SECS: i64 = 300;
 
@@ -18,13 +20,13 @@ pub fn is_session_live(s: &Session) -> bool {
     if s.exit_observed {
         return false;
     }
-    // 2. A claude process is here AND we believe it's driving this specific
+    // 2. A driving process is here AND we believe it's driving this specific
     // session (i.e., this session is among the N most-recently-modified in a
-    // project with N claude processes).
+    // project with N driving processes).
     if s.process_open {
         return true;
     }
-    // 3. Claude is running in this project but is driving a different session.
+    // 3. A process is running in this project but is driving a different session.
     // Don't let the timestamp fallback pretend this stale sibling is live just
     // because its file mtime is recent.
     if s.project_has_claude {
@@ -41,35 +43,10 @@ pub fn is_session_live(s: &Session) -> bool {
     Utc::now().signed_duration_since(t).num_seconds() < LIVE_THRESHOLD_SECS
 }
 
-fn index_tools(session: &mut Session, event_idx: usize, rec: &EventRecord) {
-    match &rec.event {
-        Event::Assistant { blocks, .. } => {
-            for (bi, b) in blocks.iter().enumerate() {
-                if let AssistantBlock::ToolUse { id, .. } = b {
-                    if !id.is_empty() {
-                        session.tool_use_index.insert(id.clone(), (event_idx, bi));
-                    }
-                }
-            }
-        }
-        Event::User(UserContent::ToolResults(rs)) => {
-            for (ri, r) in rs.iter().enumerate() {
-                if let Some(id) = &r.tool_use_id {
-                    session
-                        .tool_result_index
-                        .insert(id.clone(), (event_idx, ri));
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-const HEAD_BYTES: u64 = 64 * 1024;
-const TAIL_BYTES: u64 = 16 * 1024;
-
 pub struct Store {
-    pub projects_dir: PathBuf,
+    /// Data sources, vec-shaped so a second source is purely additive (PRD-07).
+    /// Currently only ever holds a single `ClaudeSource`.
+    sources: Vec<Arc<dyn Source>>,
     /// Project slug -> Project.
     pub projects: BTreeMap<String, Project>,
     /// Session id -> Session.
@@ -77,12 +54,28 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn new(projects_dir: PathBuf) -> Self {
+    pub fn new(sources: Vec<Arc<dyn Source>>) -> Self {
         Self {
-            projects_dir,
+            sources,
             projects: BTreeMap::new(),
             sessions: HashMap::new(),
         }
+    }
+
+    /// Look up the source backing a given kind (clones the cheap `Arc` so the
+    /// caller can hold it while mutating `self.sessions`).
+    fn source_for(&self, kind: SourceKind) -> Option<Arc<dyn Source>> {
+        self.sources.iter().find(|s| s.kind() == kind).cloned()
+    }
+
+    /// Find the source that owns a raw FS path, plus the affected session id.
+    fn owner_of_path(&self, path: &Path) -> Option<(Arc<dyn Source>, String)> {
+        for src in &self.sources {
+            if let Some(sid) = src.session_id_for_path(path) {
+                return Some((src.clone(), sid));
+            }
+        }
+        None
     }
 
     /// Project slugs sorted by most-recent session activity (desc). Projects
@@ -115,74 +108,39 @@ impl Store {
     }
 
     pub fn initial_scan(&mut self) -> Result<()> {
-        let entries = fs::read_dir(&self.projects_dir)
-            .with_context(|| format!("reading {}", self.projects_dir.display()))?;
-        for ent in entries.flatten() {
-            let path = ent.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(slug) = path.file_name().and_then(|s| s.to_str()).map(String::from) else {
-                continue;
-            };
-            self.scan_project_dir(&slug, &path);
+        let scanned: Vec<(Project, Vec<Session>)> =
+            self.sources.iter().flat_map(|src| src.scan()).collect();
+        for (project, sessions) in scanned {
+            self.ingest(project, sessions);
         }
         Ok(())
     }
 
-    fn scan_project_dir(&mut self, slug: &str, path: &Path) {
-        let mut project = Project::new(slug.to_string(), path.to_path_buf());
-        let Ok(entries) = fs::read_dir(path) else {
-            return;
-        };
-        for ent in entries.flatten() {
-            let p = ent.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
+    /// Insert a project + its sessions into the maps, then sort the project's
+    /// session list by most-recent activity (desc). The source leaves
+    /// `project.sessions` empty; ordering is a store concern.
+    fn ingest(&mut self, mut project: Project, sessions: Vec<Session>) {
+        let slug = project.slug.clone();
+        for s in sessions {
+            if !project.sessions.contains(&s.id) {
+                project.sessions.push(s.id.clone());
             }
-            let Some(stem) = p.file_stem().and_then(|s| s.to_str()).map(String::from) else {
-                continue;
-            };
-            let mut session = Session::new(stem.clone(), slug.to_string(), p.clone());
-            // mtime
-            if let Ok(meta) = ent.metadata() {
-                if let Ok(modified) = meta.modified() {
-                    if let Ok(d) = modified.duration_since(std::time::UNIX_EPOCH) {
-                        session.last_mtime = Utc.timestamp_opt(d.as_secs() as i64, 0).single();
-                    }
-                }
-            }
-            metadata_scan_session(&mut session);
-            project.sessions.push(stem.clone());
-            self.sessions.insert(stem, session);
+            self.sessions.insert(s.id.clone(), s);
         }
-        // Sort sessions by last activity desc (mtime if no last_event yet).
-        let me = &self.sessions;
-        project.sessions.sort_by(|a, b| {
-            let ta = me
-                .get(a)
-                .and_then(|s| s.last_event.or(s.last_mtime))
-                .unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().unwrap());
-            let tb = me
-                .get(b)
-                .and_then(|s| s.last_event.or(s.last_mtime))
-                .unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().unwrap());
-            tb.cmp(&ta)
-        });
-        self.projects.insert(slug.to_string(), project);
+        self.projects.insert(slug.clone(), project);
+        self.re_sort_project(&slug);
     }
 
     pub fn ensure_loaded(&mut self, session_id: &str) -> Result<()> {
-        if let Some(s) = self.sessions.get(session_id) {
-            if s.loaded {
-                return Ok(());
-            }
-        } else {
+        let kind = match self.sessions.get(session_id) {
+            Some(s) if !s.loaded => s.source,
+            _ => return Ok(()),
+        };
+        let Some(src) = self.source_for(kind) else {
             return Ok(());
-        }
+        };
         let s = self.sessions.get_mut(session_id).unwrap();
-        full_load_session(s)?;
-        Ok(())
+        src.load_session(s)
     }
 
     /// Delete all closed (non-live) sessions from disk and remove them from the store.
@@ -217,10 +175,10 @@ impl Store {
     }
 
     fn on_modified(&mut self, path: &Path) {
-        let Some((slug, sid)) = jsonl_ids_for(path) else {
+        let Some((src, sid)) = self.owner_of_path(path) else {
             return;
         };
-        // Refresh mtime
+        // Refresh mtime (source-agnostic: it is just the file's mtime).
         if let Ok(meta) = fs::metadata(path) {
             if let Ok(modified) = meta.modified() {
                 if let Ok(d) = modified.duration_since(std::time::UNIX_EPOCH) {
@@ -238,44 +196,34 @@ impl Store {
         let Some(s) = self.sessions.get_mut(&sid) else {
             return;
         };
-        if !s.loaded {
-            // Refresh metadata only.
-            metadata_scan_session(s);
-            self.re_sort_project(&slug);
-            return;
-        }
-        let _ = tail_load_session(s);
+        let slug = s.project_slug.clone();
+        let _ = src.refresh_session(s);
         self.re_sort_project(&slug);
     }
 
     fn on_created(&mut self, path: &Path) {
         if path.is_dir() {
-            let Some(slug) = path.file_name().and_then(|s| s.to_str()).map(String::from) else {
-                return;
-            };
-            self.scan_project_dir(&slug, path);
+            for src in self.sources.clone() {
+                if let Some((project, sessions)) = src.scan_project(path) {
+                    self.ingest(project, sessions);
+                    return;
+                }
+            }
             return;
         }
-        let Some((slug, sid)) = jsonl_ids_for(path) else {
+        let Some((src, sid)) = self.owner_of_path(path) else {
             return;
         };
         if self.sessions.contains_key(&sid) {
             return;
         }
-        let mut session = Session::new(sid.clone(), slug.clone(), path.to_path_buf());
-        if let Ok(meta) = fs::metadata(path) {
-            if let Ok(modified) = meta.modified() {
-                if let Ok(d) = modified.duration_since(std::time::UNIX_EPOCH) {
-                    session.last_mtime = Utc.timestamp_opt(d.as_secs() as i64, 0).single();
-                }
-            }
-        }
-        metadata_scan_session(&mut session);
+        let Some((project, session)) = src.discover_session(path) else {
+            return;
+        };
+        let slug = session.project_slug.clone();
+        let sid = session.id.clone();
         self.sessions.insert(sid.clone(), session);
-        let proj = self
-            .projects
-            .entry(slug.clone())
-            .or_insert_with(|| Project::new(slug.clone(), path.parent().unwrap().to_path_buf()));
+        let proj = self.projects.entry(slug.clone()).or_insert(project);
         if !proj.sessions.contains(&sid) {
             proj.sessions.push(sid);
         }
@@ -283,12 +231,15 @@ impl Store {
     }
 
     fn on_removed(&mut self, path: &Path) {
-        let Some((slug, sid)) = jsonl_ids_for(path) else {
+        let Some((_src, sid)) = self.owner_of_path(path) else {
             return;
         };
+        let slug = self.sessions.get(&sid).map(|s| s.project_slug.clone());
         self.sessions.remove(&sid);
-        if let Some(p) = self.projects.get_mut(&slug) {
-            p.sessions.retain(|s| s != &sid);
+        if let Some(slug) = slug {
+            if let Some(p) = self.projects.get_mut(&slug) {
+                p.sessions.retain(|s| s != &sid);
+            }
         }
     }
 
@@ -316,32 +267,40 @@ impl Store {
 
     /// Update `process_open` for all sessions.
     ///
-    /// `active_dirs` is the list of working-directory paths of running claude
-    /// processes — one entry per process, with duplicates if multiple claude
-    /// processes share a CWD. `claude` does not hold its JSONL file open, so
-    /// lsof can't tell us *which* session in a multi-session project is the
-    /// one being driven. Instead, for each project with N running claude
-    /// processes, we mark the N most-recently-active sessions as
-    /// `process_open = true`. Sessions whose JSONL hasn't been touched
-    /// recently won't be misclassified as live just because some unrelated
-    /// claude is running in the same directory.
-    pub fn apply_open_files(&mut self, active_dirs: &[std::path::PathBuf]) {
+    /// `active` is per-source: each entry is a source kind plus the working
+    /// directories of that source's running processes (one entry per process,
+    /// duplicates preserved). A source's processes don't hold their session
+    /// file open, so we can't tell *which* session in a multi-session project
+    /// is being driven. Instead, for each project with N running processes, we
+    /// mark the N most-recently-active sessions as `process_open = true`.
+    /// Sessions whose file hasn't been touched recently won't be misclassified
+    /// as live just because some unrelated process is running in the same dir.
+    ///
+    /// The N-most-recent attribution is source-agnostic and lives here; only
+    /// the CWD→slug encoding is source-specific and is delegated to the source.
+    pub fn apply_open_files(&mut self, active: &[(SourceKind, Vec<PathBuf>)]) {
         let now = Utc::now();
 
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for p in active_dirs {
-            if let Some(s) = p.to_str() {
-                *counts.entry(cwd_to_slug(s)).or_insert(0) += 1;
+        // Count running processes per (source, project slug).
+        let mut counts: HashMap<(SourceKind, String), usize> = HashMap::new();
+        for (kind, dirs) in active {
+            let Some(src) = self.source_for(*kind) else {
+                continue;
+            };
+            for dir in dirs {
+                if let Some(slug) = src.slug_for_cwd(dir) {
+                    *counts.entry((*kind, slug)).or_insert(0) += 1;
+                }
             }
         }
 
-        let mut active_sessions: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        for (slug, n) in &counts {
+        // For each (source, slug) with N processes, pick the N most-recent sessions.
+        let mut active_sessions: HashSet<String> = HashSet::new();
+        for ((kind, slug), n) in &counts {
             let mut ids: Vec<(String, Option<DateTime<Utc>>)> = self
                 .sessions
                 .iter()
-                .filter(|(_, s)| s.project_slug == *slug)
+                .filter(|(_, s)| s.source == *kind && s.project_slug == *slug)
                 .map(|(id, s)| (id.clone(), s.last_event.or(s.last_mtime)))
                 .collect();
             ids.sort_by_key(|b| Reverse(b.1));
@@ -350,11 +309,12 @@ impl Store {
             }
         }
 
+        let active_slugs: HashSet<(SourceKind, String)> = counts.into_keys().collect();
         for (id, s) in self.sessions.iter_mut() {
             let was_open = s.process_open;
             let now_open = active_sessions.contains(id);
             s.process_open = now_open;
-            s.project_has_claude = counts.contains_key(&s.project_slug);
+            s.project_has_claude = active_slugs.contains(&(s.source, s.project_slug.clone()));
             if now_open {
                 s.process_ever_open = true;
                 s.process_closed_at = None;
@@ -375,343 +335,9 @@ impl Store {
     }
 }
 
-/// True if a user-text event represents an `/exit` or `/quit` slash command.
-/// Claude Code wraps slash commands as `<command-name>/exit</command-name>` in
-/// the user-content stream, so we detect that wrapper directly.
-fn is_exit_command(text: &str) -> bool {
-    let t = text.trim();
-    t == "<command-name>/exit</command-name>" || t == "<command-name>/quit</command-name>"
-}
-
-/// Re-encode an absolute path as the slug Claude Code would use for it:
-/// replace every `/` and `.` with `-`. This is the same encoding Claude Code
-/// applies when naming the project directory under `~/.claude/projects/`.
-fn cwd_to_slug(path: &str) -> String {
-    path.chars()
-        .map(|c| if c == '/' || c == '.' { '-' } else { c })
-        .collect()
-}
-
 #[derive(Debug, Clone)]
 pub enum FsEvent {
     Created(PathBuf),
     Modified(PathBuf),
     Removed(PathBuf),
-}
-
-fn jsonl_ids_for(path: &Path) -> Option<(String, String)> {
-    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-        return None;
-    }
-    let stem = path.file_stem().and_then(|s| s.to_str())?.to_string();
-    let slug = path
-        .parent()?
-        .file_name()
-        .and_then(|s| s.to_str())?
-        .to_string();
-    Some((slug, stem))
-}
-
-fn extract_cwd(line: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct CwdOnly {
-        cwd: Option<String>,
-    }
-    serde_json::from_str::<CwdOnly>(line)
-        .ok()
-        .and_then(|r| r.cwd)
-}
-
-fn metadata_scan_session(session: &mut Session) {
-    let path = &session.file;
-    let Ok(file) = File::open(path) else { return };
-    let meta = match file.metadata() {
-        Ok(m) => m,
-        Err(_) => return,
-    };
-    let size = meta.len();
-
-    // Head pass: parse the first ~HEAD_BYTES, extract title/first user line/started.
-    let head_bytes = std::cmp::min(size, HEAD_BYTES);
-    let mut head_buf = vec![0u8; head_bytes as usize];
-    {
-        let mut f = match File::open(path) {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-        if f.read_exact(&mut head_buf).is_err() {
-            // Best-effort, partial is fine.
-            head_buf.truncate(head_bytes as usize);
-        }
-    }
-    // Drop trailing partial line.
-    let head_str = String::from_utf8_lossy(&head_buf);
-    let mut found_user = false;
-    for line in head_str.lines() {
-        if session.cwd.is_none() {
-            if let Some(cwd) = extract_cwd(line) {
-                session.cwd = Some(cwd);
-            }
-        }
-        if let Some(rec) = parse_line(line, 0) {
-            if session.started.is_none() {
-                session.started = rec.timestamp;
-            }
-            if rec.session_kind.as_deref() == Some("bg") {
-                session.is_background = true;
-            }
-            match &rec.event {
-                Event::AiTitle(t) if !t.trim().is_empty() => {
-                    session.title = Some(t.clone());
-                }
-                Event::AgentName(n) if !n.trim().is_empty() => {
-                    session.agent_name = Some(n.clone());
-                }
-                Event::User(UserContent::Text(s)) if !found_user && !s.trim().is_empty() => {
-                    let cleaned = first_line(s, 80);
-                    if !cleaned.is_empty() {
-                        session.first_user_line = Some(cleaned);
-                        found_user = true;
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Tail pass: parse the last ~TAIL_BYTES, extract last_event timestamp.
-    if size > head_bytes {
-        let tail_start = size.saturating_sub(TAIL_BYTES);
-        let mut f = match File::open(path) {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-        if f.seek(SeekFrom::Start(tail_start)).is_err() {
-            return;
-        }
-        let mut tail_buf = Vec::with_capacity(TAIL_BYTES as usize);
-        if f.read_to_end(&mut tail_buf).is_err() {
-            return;
-        }
-        let tail_str = String::from_utf8_lossy(&tail_buf);
-        let mut iter = tail_str.lines();
-        // Skip first (likely truncated) line if we're not at start.
-        if tail_start > 0 {
-            iter.next();
-        }
-        for line in iter {
-            if let Some(rec) = parse_line(line, 0) {
-                if let Some(ts) = rec.timestamp {
-                    session.last_event = Some(ts);
-                }
-                if let Event::Assistant { usage: Some(u), .. } = &rec.event {
-                    let ctx = u.input_tokens.unwrap_or(0)
-                        + u.cache_creation_input_tokens.unwrap_or(0)
-                        + u.cache_read_input_tokens.unwrap_or(0);
-                    if ctx > 0 {
-                        session.last_input_tokens = Some(ctx);
-                    }
-                }
-            }
-        }
-    } else {
-        // Whole file is in head; pick last_event and last_input_tokens from head pass.
-        let mut last_ts: Option<DateTime<Utc>> = None;
-        for line in head_str.lines() {
-            if let Some(rec) = parse_line(line, 0) {
-                if let Some(ts) = rec.timestamp {
-                    last_ts = Some(ts);
-                }
-                if let Event::Assistant { usage: Some(u), .. } = &rec.event {
-                    let ctx = u.input_tokens.unwrap_or(0)
-                        + u.cache_creation_input_tokens.unwrap_or(0)
-                        + u.cache_read_input_tokens.unwrap_or(0);
-                    if ctx > 0 {
-                        session.last_input_tokens = Some(ctx);
-                    }
-                }
-            }
-        }
-        session.last_event = last_ts;
-    }
-}
-
-fn first_line(s: &str, max: usize) -> String {
-    let cleaned = strip_command_envelope(s);
-    let line = cleaned.lines().next().unwrap_or("").trim();
-    if line.chars().count() <= max {
-        line.to_string()
-    } else {
-        let truncated: String = line.chars().take(max).collect();
-        format!("{}…", truncated)
-    }
-}
-
-/// Strip leading XML-ish envelopes the Claude CLI prepends to user messages
-/// for slash commands and local-command output (e.g.
-/// `<command-name>...</command-name>`, `<local-command-stdout>...`) so session
-/// labels show the actual user content rather than wrapper tags.
-fn strip_command_envelope(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    loop {
-        let trimmed = rest.trim_start();
-        if let Some(tag_close) = trimmed.strip_prefix('<') {
-            // Look for the end of the opening tag.
-            if let Some(end) = tag_close.find('>') {
-                let tag_name = tag_close[..end]
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .trim_start_matches('/');
-                if is_command_envelope_tag(tag_name) {
-                    // Skip past this opening tag.
-                    let after_open = &tag_close[end + 1..];
-                    let close_marker = format!("</{tag_name}>");
-                    if let Some(close_pos) = after_open.find(&close_marker) {
-                        rest = &after_open[close_pos + close_marker.len()..];
-                        continue;
-                    } else {
-                        // No close tag — drop everything we've seen and emit nothing useful.
-                        break;
-                    }
-                }
-            }
-        }
-        out.push_str(rest);
-        break;
-    }
-    out
-}
-
-fn is_command_envelope_tag(tag: &str) -> bool {
-    matches!(
-        tag,
-        "command-name"
-            | "command-message"
-            | "command-args"
-            | "local-command-stdout"
-            | "local-command-stderr"
-            | "local-command-caveat"
-    )
-}
-
-fn full_load_session(session: &mut Session) -> Result<()> {
-    let file =
-        File::open(&session.file).with_context(|| format!("opening {}", session.file.display()))?;
-    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let reader = BufReader::new(file);
-    let mut events = Vec::new();
-    let mut offset: u64 = 0;
-    session.usage_totals = Default::default();
-    session.last_input_tokens = None;
-    session.tool_use_index.clear();
-    session.tool_result_index.clear();
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        let len = line.len() as u64;
-        if let Some(rec) = parse_line(&line, offset) {
-            let event_idx = events.len();
-            index_tools(session, event_idx, &rec);
-            apply_event_side_effects(session, &rec);
-            events.push(rec);
-        }
-        offset += len + 1; // +1 for \n consumed by lines()
-    }
-    session.events = events;
-    session.byte_offset = size;
-    session.loaded = true;
-    Ok(())
-}
-
-fn tail_load_session(session: &mut Session) -> Result<()> {
-    let mut file =
-        File::open(&session.file).with_context(|| format!("opening {}", session.file.display()))?;
-    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-    if size <= session.byte_offset {
-        return Ok(());
-    }
-    let to_read = std::cmp::min(size - session.byte_offset, 1024 * 1024);
-    file.seek(SeekFrom::Start(session.byte_offset))?;
-    let mut buf = vec![0u8; to_read as usize];
-    file.read_exact(&mut buf)?;
-    // Find last newline; ignore trailing partial line and rewind offset to keep it for next tick.
-    let last_nl = buf.iter().rposition(|&b| b == b'\n');
-    let consumed = match last_nl {
-        Some(i) => i + 1,
-        None => 0, // No complete line yet; do not advance.
-    };
-    let usable = &buf[..consumed];
-    let chunk = String::from_utf8_lossy(usable);
-    let mut local_offset = session.byte_offset;
-    for line in chunk.split('\n') {
-        if line.is_empty() {
-            local_offset += 1;
-            continue;
-        }
-        let len = line.len() as u64;
-        if let Some(rec) = parse_line(line, local_offset) {
-            let event_idx = session.events.len();
-            index_tools(session, event_idx, &rec);
-            apply_event_side_effects(session, &rec);
-            session.events.push(rec);
-        }
-        local_offset += len + 1;
-    }
-    session.byte_offset += consumed as u64;
-    Ok(())
-}
-
-fn apply_event_side_effects(session: &mut Session, rec: &EventRecord) {
-    if let Some(ts) = rec.timestamp {
-        session.last_event = Some(ts);
-        if session.started.is_none() {
-            session.started = Some(ts);
-        }
-    }
-    if rec.is_sidechain {
-        session.sidechain_event_count += 1;
-    }
-    if rec.session_kind.as_deref() == Some("bg") {
-        session.is_background = true;
-    }
-    if let Event::User(UserContent::Text(s)) = &rec.event {
-        if is_exit_command(s) {
-            session.exit_observed = true;
-        }
-    }
-    match &rec.event {
-        Event::AiTitle(t) if !t.trim().is_empty() => session.title = Some(t.clone()),
-        Event::AgentName(n) if !n.trim().is_empty() => session.agent_name = Some(n.clone()),
-        Event::User(UserContent::Text(s))
-            if session.first_user_line.is_none() && !s.trim().is_empty() =>
-        {
-            let cleaned = first_line(s, 80);
-            if !cleaned.is_empty() {
-                session.first_user_line = Some(cleaned);
-            }
-        }
-        Event::Assistant { usage: Some(u), .. } => {
-            let any_nonzero = u.input_tokens.unwrap_or(0) > 0
-                || u.output_tokens.unwrap_or(0) > 0
-                || u.cache_creation_input_tokens.unwrap_or(0) > 0
-                || u.cache_read_input_tokens.unwrap_or(0) > 0;
-            if any_nonzero {
-                session.usage_totals.add(u, rec.model.as_deref());
-                // Full context size = all input-side tokens (most are cache hits/writes).
-                let ctx = u.input_tokens.unwrap_or(0)
-                    + u.cache_creation_input_tokens.unwrap_or(0)
-                    + u.cache_read_input_tokens.unwrap_or(0);
-                if ctx > 0 {
-                    session.last_input_tokens = Some(ctx);
-                }
-            }
-        }
-        _ => {}
-    }
-    // Suppress unused warning on AssistantBlock import path.
-    let _ = std::any::type_name::<AssistantBlock>();
 }

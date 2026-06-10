@@ -7,6 +7,18 @@ use serde_json::Value;
 
 const MAX_FIELD_LEN: usize = 4096;
 
+/// Which on-disk source a project/session originates from. Defaults to
+/// `Claude`; later sources (OpenCode) set it explicitly so the UI can badge
+/// and route per item. Keeping a default keeps existing construction sites
+/// compiling unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SourceKind {
+    #[default]
+    Claude,
+    #[allow(dead_code)] // populated starting with PRD-03 (OpenCode reader)
+    Opencode,
+}
+
 #[derive(Debug, Clone)]
 pub struct Project {
     #[allow(dead_code)] // keyed in the store by the same slug; kept for symmetry/future use
@@ -15,6 +27,10 @@ pub struct Project {
     pub path: PathBuf,
     pub display_path: String,
     pub sessions: Vec<String>,
+    /// Originating data source. Defaults to `Claude`. Read starting with PRD-07
+    /// (per-source UI badging/routing).
+    #[allow(dead_code)]
+    pub source: SourceKind,
 }
 
 impl Project {
@@ -25,6 +41,7 @@ impl Project {
             path,
             display_path,
             sessions: Vec::new(),
+            source: SourceKind::Claude,
         }
     }
 }
@@ -107,6 +124,8 @@ pub struct Session {
     pub tool_result_index: HashMap<String, (usize, usize)>,
     /// input_tokens from the most recent assistant turn — represents current context size.
     pub last_input_tokens: Option<u64>,
+    /// Originating data source. Defaults to `Claude`.
+    pub source: SourceKind,
 }
 
 impl Session {
@@ -136,6 +155,7 @@ impl Session {
             tool_use_index: HashMap::new(),
             tool_result_index: HashMap::new(),
             last_input_tokens: None,
+            source: SourceKind::Claude,
         }
     }
 
