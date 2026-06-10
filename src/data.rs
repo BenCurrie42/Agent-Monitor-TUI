@@ -217,6 +217,34 @@ pub fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+/// Populate a session's `tool_use_index` / `tool_result_index` from one event
+/// record at position `event_idx`. Shared by every source (Claude JSONL and
+/// OpenCode message/part) so the detail/expand cross-link UI behaves identically
+/// regardless of origin.
+pub fn index_tools(session: &mut Session, event_idx: usize, rec: &EventRecord) {
+    match &rec.event {
+        Event::Assistant { blocks, .. } => {
+            for (bi, b) in blocks.iter().enumerate() {
+                if let AssistantBlock::ToolUse { id, .. } = b {
+                    if !id.is_empty() {
+                        session.tool_use_index.insert(id.clone(), (event_idx, bi));
+                    }
+                }
+            }
+        }
+        Event::User(UserContent::ToolResults(rs)) => {
+            for (ri, r) in rs.iter().enumerate() {
+                if let Some(id) = &r.tool_use_id {
+                    session
+                        .tool_result_index
+                        .insert(id.clone(), (event_idx, ri));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct UsageTotals {
     pub input: u64,
@@ -232,6 +260,29 @@ pub struct UsageTotals {
 }
 
 impl UsageTotals {
+    /// Accumulate token counts only (no cost computation). Used when the source
+    /// provides an authoritative per-message cost that should not be estimated
+    /// from a pricing table — see [`UsageTotals::add_authoritative_cost`].
+    pub fn add_tokens(&mut self, u: &Usage) {
+        self.input = self.input.saturating_add(u.input_tokens.unwrap_or(0));
+        self.output = self.output.saturating_add(u.output_tokens.unwrap_or(0));
+        self.cache_creation = self
+            .cache_creation
+            .saturating_add(u.cache_creation_input_tokens.unwrap_or(0));
+        self.cache_read = self
+            .cache_read
+            .saturating_add(u.cache_read_input_tokens.unwrap_or(0));
+        self.has_usage = true;
+    }
+
+    /// Add an authoritative USD cost reported by the source itself (e.g.
+    /// OpenCode records the real cost per assistant message). This is preferred
+    /// over a pricing-table estimate; the computed path (`add`) is only the
+    /// fallback when the source reports no cost.
+    pub fn add_authoritative_cost(&mut self, cost: f64) {
+        self.cost_usd += cost;
+    }
+
     pub fn add(&mut self, u: &Usage, model: Option<&str>) {
         self.input = self.input.saturating_add(u.input_tokens.unwrap_or(0));
         self.output = self.output.saturating_add(u.output_tokens.unwrap_or(0));

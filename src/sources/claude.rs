@@ -15,7 +15,7 @@ use chrono::{DateTime, TimeZone, Utc};
 
 use super::Source;
 use crate::data::{
-    parse_line, AssistantBlock, Event, EventRecord, Project, Session, SourceKind, UserContent,
+    index_tools, parse_line, Event, EventRecord, Project, Session, SourceKind, UserContent,
 };
 
 const HEAD_BYTES: u64 = 64 * 1024;
@@ -176,30 +176,6 @@ fn extract_cwd(line: &str) -> Option<String> {
     serde_json::from_str::<CwdOnly>(line)
         .ok()
         .and_then(|r| r.cwd)
-}
-
-fn index_tools(session: &mut Session, event_idx: usize, rec: &EventRecord) {
-    match &rec.event {
-        Event::Assistant { blocks, .. } => {
-            for (bi, b) in blocks.iter().enumerate() {
-                if let AssistantBlock::ToolUse { id, .. } = b {
-                    if !id.is_empty() {
-                        session.tool_use_index.insert(id.clone(), (event_idx, bi));
-                    }
-                }
-            }
-        }
-        Event::User(UserContent::ToolResults(rs)) => {
-            for (ri, r) in rs.iter().enumerate() {
-                if let Some(id) = &r.tool_use_id {
-                    session
-                        .tool_result_index
-                        .insert(id.clone(), (event_idx, ri));
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 fn metadata_scan_session(session: &mut Session) {
