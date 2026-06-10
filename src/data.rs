@@ -313,45 +313,234 @@ pub struct ModelPrice {
     pub cache_read: f64,
 }
 
-/// USD per million tokens. Approximate, update as Anthropic changes pricing.
+/// Normalize a model identifier for matching.
+///
+/// Lowercases the string, then strips any `<providerID>/` prefix — taking only
+/// the part after the **last** `/`.  This means:
+///
+/// - `"openai/gpt-4o"` → `"gpt-4o"`
+/// - `"opencode-go/deepseek-v4-flash"` → `"deepseek-v4-flash"`
+/// - `"claude-sonnet-4-6"` (no `/`) → `"claude-sonnet-4-6"`  (no-op)
+fn normalize_model_id(model: &str) -> String {
+    let lower = model.to_ascii_lowercase();
+    match lower.rfind('/') {
+        Some(pos) => lower[pos + 1..].to_string(),
+        None => lower,
+    }
+}
+
+/// USD per million tokens for known model families.
+///
+/// Approximate rates — update as providers change pricing.
+/// Sources consulted at implementation time (2026-06-10):
+///   Anthropic: https://www.anthropic.com/pricing
+///   OpenAI:    https://openai.com/api/pricing/
+///   DeepSeek:  https://platform.deepseek.com/docs/quickstart
+///   Moonshot/Kimi: https://platform.moonshot.ai/docs/pricing/chat
+///   Google Gemini: https://ai.google.dev/gemini-api/docs/pricing
+///
+/// Be conservative: a wrong price is worse than an unknown flag. For
+/// self-hosted / local endpoints (nvidia routing, opencode-go routing ids)
+/// we return `None` — OpenCode records `cost: 0` for those and the
+/// authoritative cost path surfaces that correctly.
 pub fn model_price(model: &str) -> Option<ModelPrice> {
-    let m = model.to_ascii_lowercase();
+    let lower = model.to_ascii_lowercase();
+
+    // Early-return for providers known to host self-served / zero-cost endpoints
+    // whose prices we cannot determine. The provider prefix is significant here:
+    // "nvidia/..." is a routing namespace for NVIDIA-hosted models (often local
+    // or self-hosted), not a guarantee of OpenAI API rates.  "opencode-go/..." is
+    // the internal OpenCode routing layer — prices vary by actual backend.
+    // We check the provider prefix BEFORE stripping it.
+    if let Some(slash) = lower.find('/') {
+        let provider = &lower[..slash];
+        if provider == "nvidia" || provider == "opencode-go" {
+            return None;
+        }
+    }
+
+    // Normalize: lowercase + strip provider prefix.
+    let m = normalize_model_id(model);
+
+    // --- Anthropic (approximate, update as Anthropic changes pricing) ---
     if m.contains("opus") {
-        Some(ModelPrice {
+        return Some(ModelPrice {
             input: 5.00,
             output: 25.00,
             cache_write: 6.25,
             cache_read: 0.50,
-        })
-    } else if m.contains("sonnet") {
-        Some(ModelPrice {
+        });
+    }
+    if m.contains("sonnet") {
+        return Some(ModelPrice {
             input: 3.00,
             output: 15.00,
             cache_write: 3.75,
             cache_read: 0.30,
-        })
-    } else if m.contains("haiku") {
-        Some(ModelPrice {
+        });
+    }
+    if m.contains("haiku") {
+        return Some(ModelPrice {
             input: 1.00,
             output: 5.00,
             cache_write: 1.25,
             cache_read: 0.10,
-        })
-    } else {
-        None
+        });
     }
+
+    // --- OpenAI (approximate, update as providers change pricing) ---
+    // gpt-oss: internal/hosted OpenAI models served at roughly gpt-4-class rates.
+    if m.contains("gpt-oss") {
+        return Some(ModelPrice {
+            input: 5.00,
+            output: 15.00,
+            cache_write: 0.00,
+            cache_read: 0.00,
+        });
+    }
+    // gpt-4o family (gpt-4o, gpt-4o-mini uses different tier — only match non-mini here).
+    if m.contains("gpt-4o-mini") {
+        return Some(ModelPrice {
+            input: 0.15,
+            output: 0.60,
+            cache_write: 0.00,
+            cache_read: 0.075,
+        });
+    }
+    if m.contains("gpt-4o") {
+        return Some(ModelPrice {
+            input: 2.50,
+            output: 10.00,
+            cache_write: 0.00,
+            cache_read: 1.25,
+        });
+    }
+    // o1 reasoning models ($15/$60 per 1M as of implementation).
+    if m.contains("o1") {
+        return Some(ModelPrice {
+            input: 15.00,
+            output: 60.00,
+            cache_write: 0.00,
+            cache_read: 7.50,
+        });
+    }
+    // o3 reasoning models ($10/$40 per 1M as of implementation).
+    if m.contains("o3") {
+        return Some(ModelPrice {
+            input: 10.00,
+            output: 40.00,
+            cache_write: 0.00,
+            cache_read: 2.50,
+        });
+    }
+
+    // --- DeepSeek (approximate, update as providers change pricing) ---
+    // deepseek-chat / deepseek-v3 / deepseek-v4* — $0.27/$1.10 per 1M.
+    if m.contains("deepseek") {
+        return Some(ModelPrice {
+            input: 0.27,
+            output: 1.10,
+            cache_write: 0.00,
+            cache_read: 0.07,
+        });
+    }
+
+    // --- Moonshot / Kimi (approximate, update as providers change pricing) ---
+    // kimi-k2 and related: $0.15/$2.50 per 1M as of implementation.
+    if m.contains("kimi") {
+        return Some(ModelPrice {
+            input: 0.15,
+            output: 2.50,
+            cache_write: 0.00,
+            cache_read: 0.00,
+        });
+    }
+
+    // --- Google Gemini (approximate, update as providers change pricing) ---
+    // gemini-2.5-pro: $1.25/$10.00 per 1M as of implementation.
+    // gemini-2.5-flash: $0.075/$0.30.
+    // gemini-1.5-pro: $1.25/$5.00.
+    // Use a conservative "gemini-flash" check first (more specific).
+    if m.contains("gemini") && m.contains("flash") {
+        return Some(ModelPrice {
+            input: 0.075,
+            output: 0.30,
+            cache_write: 0.00,
+            cache_read: 0.019,
+        });
+    }
+    if m.contains("gemini") {
+        return Some(ModelPrice {
+            input: 1.25,
+            output: 10.00,
+            cache_write: 0.00,
+            cache_read: 0.31,
+        });
+    }
+
+    // --- Llama / self-hosted (price unknown; return None — correct & honest) ---
+    // These include nvidia-hosted, meta-hosted, and opencode-go local endpoints.
+    // OpenCode records cost: 0 for these; the authoritative cost path handles it.
+
+    None
 }
 
-/// Input token limit for a given model. Opus 4.6+/Sonnet 4.6+ have 1M; everything else 200k.
+/// Input token limit for a given model.
+///
+/// Anthropic Opus 4.6+/Sonnet 4.6+ have 1M context; everything else uses a
+/// sensible published window or a 200k safe default for unknowns.
 pub fn model_context_window(model: &str) -> u64 {
-    let m = model.to_ascii_lowercase();
+    // Normalize: lowercase + strip provider prefix.
+    let m = normalize_model_id(model);
+
+    // Anthropic 1M rule: Opus 4.6+ and Sonnet 4.6+ — keep EXACTLY as-is.
     if (m.contains("opus") && (m.contains("4-6") || m.contains("4-7")))
         || (m.contains("sonnet") && m.contains("4-6"))
     {
-        1_000_000
-    } else {
-        200_000
+        return 1_000_000;
     }
+
+    // Other Anthropic models (matched before provider-agnostic fallback).
+    if m.contains("opus") || m.contains("sonnet") || m.contains("haiku") {
+        return 200_000;
+    }
+
+    // OpenAI GPT-4o / gpt-oss: 128k.
+    if m.contains("gpt-4o") || m.contains("gpt-oss") {
+        return 128_000;
+    }
+    // OpenAI o1/o3 reasoning: 128k.
+    if m.contains("o1") || m.contains("o3") {
+        return 128_000;
+    }
+    // OpenAI gpt-4 (non-4o): 8k or 128k depending on variant — use 128k as safe upper.
+    if m.contains("gpt-4") {
+        return 128_000;
+    }
+
+    // DeepSeek: 64k (deepseek-chat/v3/v4 context window).
+    if m.contains("deepseek") {
+        return 64_000;
+    }
+
+    // Kimi K2: 128k.
+    if m.contains("kimi") {
+        return 128_000;
+    }
+
+    // Google Gemini 2.5 Pro/Flash: 1M context.
+    // Gemini 1.5 Pro: also 1M (2M extended). Use 1M as the baseline.
+    if m.contains("gemini") {
+        return 1_000_000;
+    }
+
+    // Llama 3.x: 128k.
+    if m.contains("llama") {
+        return 128_000;
+    }
+
+    // Safe default for unknown models.
+    200_000
 }
 
 #[derive(Debug, Clone)]
@@ -821,5 +1010,185 @@ mod tests {
         t.add(&u, Some("some-future-model"));
         assert!(t.unknown_model);
         assert_eq!(t.cost_usd, 0.0);
+    }
+
+    // --- PRD-05: multi-provider pricing tests ---
+
+    // Helper: run model_price and assert input/output rates match within tolerance.
+    fn assert_price(model: &str, expected_in: f64, expected_out: f64) {
+        let p = model_price(model).unwrap_or_else(|| panic!("expected price for {model}"));
+        assert!(
+            (p.input - expected_in).abs() < 1e-9,
+            "input price mismatch for {model}: got {}, want {expected_in}",
+            p.input
+        );
+        assert!(
+            (p.output - expected_out).abs() < 1e-9,
+            "output price mismatch for {model}: got {}, want {expected_out}",
+            p.output
+        );
+    }
+
+    // Anthropic regressions — these must be byte-for-byte unchanged.
+    #[test]
+    fn anthropic_opus_price_regression() {
+        assert_price("claude-opus-4-6", 5.00, 25.00);
+    }
+
+    #[test]
+    fn anthropic_sonnet_price_regression() {
+        assert_price("claude-sonnet-4-6", 3.00, 15.00);
+    }
+
+    #[test]
+    fn anthropic_haiku_price_regression() {
+        assert_price("claude-haiku-3-5", 1.00, 5.00);
+    }
+
+    // Provider-prefixed Anthropic ids must still resolve (e.g. if OpenCode ever
+    // emits "anthropic/claude-sonnet-4-6").
+    #[test]
+    fn anthropic_sonnet_with_provider_prefix() {
+        assert_price("anthropic/claude-sonnet-4-6", 3.00, 15.00);
+    }
+
+    // OpenAI: gpt-4o family.
+    #[test]
+    fn openai_gpt4o_price() {
+        assert_price("openai/gpt-4o", 2.50, 10.00);
+    }
+
+    // OpenAI: gpt-4o bare id.
+    #[test]
+    fn openai_gpt4o_bare() {
+        assert_price("gpt-4o", 2.50, 10.00);
+    }
+
+    // OpenAI: gpt-oss (internal/hosted variant).
+    #[test]
+    fn openai_gpt_oss_price() {
+        assert_price("openai/gpt-oss-120b", 5.00, 15.00);
+    }
+
+    // OpenAI: o1/o3 reasoning models.
+    #[test]
+    fn openai_o3_price() {
+        // o3 — $10/$40 per 1M
+        assert_price("openai/o3", 10.00, 40.00);
+    }
+
+    #[test]
+    fn openai_o1_price() {
+        assert_price("openai/o1", 15.00, 60.00);
+    }
+
+    // DeepSeek: deepseek-v3 / deepseek-v4-flash etc.
+    // "opencode-go" is a routing namespace → None (self-hosted, price unknown).
+    #[test]
+    fn deepseek_opencode_go_provider_returns_none() {
+        // opencode-go is an internal routing layer; prices vary by actual backend.
+        assert!(model_price("opencode-go/deepseek-v4-flash").is_none());
+    }
+
+    #[test]
+    fn deepseek_price_via_deepseek_provider() {
+        // deepseek-prefixed provider should resolve to deepseek pricing.
+        assert_price("deepseek/deepseek-chat", 0.27, 1.10);
+    }
+
+    #[test]
+    fn deepseek_bare_id() {
+        assert_price("deepseek-chat", 0.27, 1.10);
+    }
+
+    // Kimi / Moonshot.
+    #[test]
+    fn kimi_price() {
+        assert_price("moonshotai/kimi-k2.6", 0.15, 2.50);
+    }
+
+    // Gemini.
+    #[test]
+    fn gemini_price() {
+        assert_price("google/gemini-2.5-pro", 1.25, 10.00);
+    }
+
+    // Llama — we deliberately return None (self-hosted, price unknown).
+    #[test]
+    fn llama_returns_none() {
+        assert!(model_price("nvidia/llama-3.1-70b").is_none());
+        assert!(model_price("meta/llama-3").is_none());
+    }
+
+    // opencode-go bare routing ids with no known provider price → None.
+    #[test]
+    fn unknown_opencode_model_returns_none() {
+        assert!(model_price("opencode-go/some-local-model").is_none());
+    }
+
+    // --- Context window tests ---
+
+    // Anthropic 1M rule must still fire.
+    #[test]
+    fn context_window_opus_4_6_is_1m() {
+        assert_eq!(model_context_window("claude-opus-4-6"), 1_000_000);
+    }
+
+    #[test]
+    fn context_window_sonnet_4_6_is_1m() {
+        assert_eq!(model_context_window("claude-sonnet-4-6"), 1_000_000);
+    }
+
+    // GPT-4o: 128k.
+    #[test]
+    fn context_window_gpt4o() {
+        assert_eq!(model_context_window("openai/gpt-4o"), 128_000);
+    }
+
+    // Gemini 2.5 Pro: 1M context.
+    #[test]
+    fn context_window_gemini_25_pro() {
+        assert_eq!(model_context_window("google/gemini-2.5-pro"), 1_000_000);
+    }
+
+    // DeepSeek: 64k.
+    #[test]
+    fn context_window_deepseek() {
+        assert_eq!(model_context_window("deepseek-chat"), 64_000);
+    }
+
+    // Kimi K2: 128k.
+    #[test]
+    fn context_window_kimi() {
+        assert_eq!(model_context_window("moonshotai/kimi-k2.6"), 128_000);
+    }
+
+    // Unknown model falls back to 200k safe default.
+    #[test]
+    fn context_window_unknown_defaults_200k() {
+        assert_eq!(model_context_window("some-mystery-model"), 200_000);
+    }
+
+    // --- Authoritative cost path regression (PRD-04) ---
+    // When add_authoritative_cost is used, the pricing table is never consulted
+    // and unknown_model stays false.
+    #[test]
+    fn authoritative_cost_path_unaffected_by_pricing_table() {
+        let mut t = UsageTotals::default();
+        let u = Usage {
+            input_tokens: Some(1_000_000),
+            output_tokens: Some(1_000_000),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        // add_tokens accumulates counts without touching cost or unknown_model.
+        t.add_tokens(&u);
+        t.add_authoritative_cost(7.42);
+        assert!((t.cost_usd - 7.42).abs() < 1e-9, "cost should be 7.42");
+        assert!(
+            !t.unknown_model,
+            "unknown_model must not be set by authoritative cost path"
+        );
+        assert!(t.has_usage);
     }
 }
