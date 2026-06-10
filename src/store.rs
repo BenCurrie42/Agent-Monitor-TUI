@@ -98,6 +98,13 @@ impl Store {
         self.sources.iter().find(|s| s.kind() == kind).cloned()
     }
 
+    /// Number of active sources. The UI uses this to decide whether to show a
+    /// per-item source badge: with a single source there is nothing to
+    /// disambiguate, so badges are suppressed and the UI is unchanged.
+    pub fn source_count(&self) -> usize {
+        self.sources.len()
+    }
+
     /// Find the source that owns a raw FS path, plus the affected session id.
     fn owner_of_path(&self, path: &Path) -> Option<(Arc<dyn Source>, String)> {
         for src in &self.sources {

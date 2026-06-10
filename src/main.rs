@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use crossbeam_channel::{select, tick, unbounded};
 use crossterm::event::{self, Event as CtEvent, KeyEventKind};
 use crossterm::execute;
@@ -25,9 +25,21 @@ use ratatui::Terminal;
 
 use crate::app::{AppEvent, AppState, Mode};
 use crate::data::SourceKind;
-use crate::sources::{ClaudeSource, Source};
+use crate::sources::{ClaudeSource, OpencodeSource, Source};
 use crate::store::Store;
 use crate::watcher::spawn_watcher;
+
+/// Which data sources to load. The `--source` control surface; defaults to
+/// `all` so a machine with both tools shows everything with no flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SourceSelection {
+    /// Claude Code sessions only.
+    Claude,
+    /// OpenCode sessions only.
+    Opencode,
+    /// Every source that is present on disk.
+    All,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -36,11 +48,20 @@ use crate::watcher::spawn_watcher;
     version
 )]
 struct Args {
-    /// Override the projects directory (defaults to ~/.claude/projects)
+    /// Override the Claude projects directory (defaults to ~/.claude/projects)
     #[arg(long)]
     projects_dir: Option<PathBuf>,
 
-    /// Preselect a session by UUID on launch
+    /// Override the OpenCode storage directory
+    /// (defaults to $XDG_DATA_HOME/opencode/storage → ~/.local/share/opencode/storage)
+    #[arg(long)]
+    opencode_dir: Option<PathBuf>,
+
+    /// Which data sources to load: claude, opencode, or all (default).
+    #[arg(long, value_enum, default_value_t = SourceSelection::All)]
+    source: SourceSelection,
+
+    /// Preselect a session by UUID/prefix on launch (matches across sources)
     #[arg(long)]
     session: Option<String>,
 
@@ -60,20 +81,37 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let projects_dir = match args.projects_dir.clone() {
+    let claude_dir = match args.projects_dir.clone() {
         Some(p) => p,
         None => default_projects_dir().context("locating ~/.claude/projects")?,
     };
+    let opencode_dir = match args.opencode_dir.clone() {
+        Some(p) => p,
+        None => default_opencode_dir().context("locating OpenCode storage dir")?,
+    };
 
-    if !projects_dir.is_dir() {
-        anyhow::bail!(
-            "projects dir does not exist or is not a directory: {}",
-            projects_dir.display()
-        );
+    let sources = build_sources(args.source, &claude_dir, &opencode_dir);
+    if sources.is_empty() {
+        // Nothing to load: report what the selection wanted and why it's missing.
+        match args.source {
+            SourceSelection::Claude => anyhow::bail!(
+                "Claude projects dir does not exist or is not a directory: {}",
+                claude_dir.display()
+            ),
+            SourceSelection::Opencode => anyhow::bail!(
+                "OpenCode storage dir does not exist or is not a directory: {}",
+                opencode_dir.display()
+            ),
+            SourceSelection::All => anyhow::bail!(
+                "no data source found: neither {} nor {} exists",
+                claude_dir.display(),
+                opencode_dir.display()
+            ),
+        }
     }
 
     if args.dump {
-        return run_dump(&projects_dir, args.session.clone());
+        return run_dump(&sources, args.session.clone());
     }
 
     install_panic_hook();
@@ -84,7 +122,7 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("creating terminal")?;
 
-    let run_result = run(&mut terminal, &args, &projects_dir);
+    let run_result = run(&mut terminal, &args, sources);
 
     // Always restore terminal, even on error.
     disable_raw_mode().ok();
@@ -97,13 +135,8 @@ fn main() -> Result<()> {
 fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     args: &Args,
-    projects_dir: &Path,
+    sources: Vec<Arc<dyn Source>>,
 ) -> Result<()> {
-    // Build the data sources. Vec-shaped so adding a second source (PRD-07) is
-    // additive; for now it is a single Claude source.
-    let claude: Arc<dyn Source> = Arc::new(ClaudeSource::new(projects_dir.to_path_buf()));
-    let sources: Vec<Arc<dyn Source>> = vec![claude];
-
     let mut store = Store::new(sources.clone());
     store.initial_scan().context("initial projects scan")?;
 
@@ -229,22 +262,70 @@ fn default_projects_dir() -> Result<PathBuf> {
     Ok(home.join(".claude").join("projects"))
 }
 
-fn run_dump(projects_dir: &Path, session_id: Option<String>) -> Result<()> {
-    let claude: Arc<dyn Source> = Arc::new(ClaudeSource::new(projects_dir.to_path_buf()));
-    let mut store = Store::new(vec![claude]);
+/// Resolve the OpenCode storage dir: `$XDG_DATA_HOME/opencode/storage` if
+/// `XDG_DATA_HOME` is set, otherwise `~/.local/share/opencode/storage`.
+fn default_opencode_dir() -> Result<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(xdg).join("opencode").join("storage"));
+    }
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    Ok(home
+        .join(".local")
+        .join("share")
+        .join("opencode")
+        .join("storage"))
+}
+
+/// Build the active source list from a CLI selection and the two candidate
+/// directories. A source is only included if its directory exists on disk, so
+/// `all` on a Claude-only machine yields just the Claude source. Pure +
+/// dependency-light so it is unit-testable without a TTY.
+fn build_sources(
+    selection: SourceSelection,
+    claude_dir: &Path,
+    opencode_dir: &Path,
+) -> Vec<Arc<dyn Source>> {
+    let want_claude = matches!(selection, SourceSelection::Claude | SourceSelection::All);
+    let want_opencode = matches!(selection, SourceSelection::Opencode | SourceSelection::All);
+
+    let mut sources: Vec<Arc<dyn Source>> = Vec::new();
+    if want_claude && claude_dir.is_dir() {
+        sources.push(Arc::new(ClaudeSource::new(claude_dir.to_path_buf())));
+    }
+    if want_opencode && opencode_dir.is_dir() {
+        sources.push(Arc::new(OpencodeSource::new(opencode_dir.to_path_buf())));
+    }
+    sources
+}
+
+/// Short source tag for the `--dump` summary (`cc` = Claude Code, `oc` = OpenCode).
+fn source_tag(kind: SourceKind) -> &'static str {
+    match kind {
+        SourceKind::Claude => "cc",
+        SourceKind::Opencode => "oc",
+    }
+}
+
+fn run_dump(sources: &[Arc<dyn Source>], session_id: Option<String>) -> Result<()> {
+    let mut store = Store::new(sources.to_vec());
     store.initial_scan().context("scan")?;
+    let source_labels: Vec<&str> = sources.iter().map(|s| source_tag(s.kind())).collect();
     println!(
-        "{} project(s), {} session(s) in {}",
+        "{} project(s), {} session(s) across source(s): {}",
         store.projects.len(),
         store.sessions.len(),
-        projects_dir.display()
+        source_labels.join(", ")
     );
     for slug in store.project_order_by_recency() {
         let Some(proj) = store.projects.get(&slug) else {
             continue;
         };
-        let display = crate::data::decode_slug(&slug);
-        println!("  {} — {} session(s)", display, proj.sessions.len());
+        println!(
+            "  [{}] {} — {} session(s)",
+            source_tag(proj.source),
+            proj.display_path,
+            proj.sessions.len()
+        );
         for sid in proj.sessions.iter().take(5) {
             if let Some(s) = store.sessions.get(sid) {
                 let last = s
@@ -253,7 +334,8 @@ fn run_dump(projects_dir: &Path, session_id: Option<String>) -> Result<()> {
                     .map(|t| t.to_rfc3339())
                     .unwrap_or_else(|| "—".to_string());
                 println!(
-                    "    {} {:<60.60} last={}",
+                    "    [{}] {} {:<60.60} last={}",
+                    source_tag(s.source),
                     crate::data::short_id(&s.id),
                     s.display_label(),
                     last
@@ -360,4 +442,101 @@ fn install_panic_hook() {
         execute!(io::stdout(), LeaveAlternateScreen).ok();
         original(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Self-cleaning temp directory (mirrors the source-module test helper to
+    /// avoid pulling in an extra dev-dependency).
+    struct TmpDir(PathBuf);
+    impl TmpDir {
+        fn new() -> Self {
+            static N: AtomicU32 = AtomicU32::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "am-main-src-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            TmpDir(dir)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Create two temp dirs that look like a Claude projects dir and an
+    /// OpenCode storage dir (presence is all `build_sources` checks).
+    fn fake_dirs() -> (TmpDir, PathBuf, PathBuf) {
+        let tmp = TmpDir::new();
+        let claude = tmp.path().join("claude_projects");
+        let opencode = tmp.path().join("opencode_storage");
+        fs::create_dir_all(&claude).unwrap();
+        fs::create_dir_all(&opencode).unwrap();
+        (tmp, claude, opencode)
+    }
+
+    fn kinds(sources: &[Arc<dyn Source>]) -> Vec<SourceKind> {
+        sources.iter().map(|s| s.kind()).collect()
+    }
+
+    #[test]
+    fn all_selection_includes_both_present_sources() {
+        let (_tmp, claude, opencode) = fake_dirs();
+        let sources = build_sources(SourceSelection::All, &claude, &opencode);
+        let ks = kinds(&sources);
+        assert!(
+            ks.contains(&SourceKind::Claude),
+            "expected claude in {ks:?}"
+        );
+        assert!(
+            ks.contains(&SourceKind::Opencode),
+            "expected opencode in {ks:?}"
+        );
+        assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn claude_selection_excludes_opencode() {
+        let (_tmp, claude, opencode) = fake_dirs();
+        let sources = build_sources(SourceSelection::Claude, &claude, &opencode);
+        let ks = kinds(&sources);
+        assert_eq!(ks, vec![SourceKind::Claude]);
+        assert!(!ks.contains(&SourceKind::Opencode));
+    }
+
+    #[test]
+    fn opencode_selection_excludes_claude() {
+        let (_tmp, claude, opencode) = fake_dirs();
+        let sources = build_sources(SourceSelection::Opencode, &claude, &opencode);
+        assert_eq!(kinds(&sources), vec![SourceKind::Opencode]);
+    }
+
+    #[test]
+    fn missing_dir_is_dropped_even_under_all() {
+        let (_tmp, claude, _opencode) = fake_dirs();
+        let missing = claude.parent().unwrap().join("does_not_exist");
+        // Only Claude dir exists; `all` should yield just Claude.
+        let sources = build_sources(SourceSelection::All, &claude, &missing);
+        assert_eq!(kinds(&sources), vec![SourceKind::Claude]);
+    }
+
+    #[test]
+    fn explicit_selection_with_missing_dir_yields_empty() {
+        let (_tmp, claude, _opencode) = fake_dirs();
+        let missing = claude.parent().unwrap().join("nope");
+        // Asking for opencode when its dir is absent → empty (caller errors).
+        let sources = build_sources(SourceSelection::Opencode, &claude, &missing);
+        assert!(sources.is_empty());
+    }
 }

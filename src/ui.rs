@@ -105,6 +105,10 @@ fn render_sidebar(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
     // Reuse the rows already built by resolve_selection this tick instead of
     // walking the sessions map again.
     let rows = &app.sidebar_rows_cache;
+    // Only badge items when more than one source is active — with a single
+    // source there is nothing to disambiguate, so the UI stays unchanged.
+    let mixed = store.source_count() > 1;
+    let badge_style = Style::default().fg(c_badge());
     let mut items: Vec<ListItem> = Vec::with_capacity(rows.len());
     for row in rows.iter() {
         match row {
@@ -136,12 +140,19 @@ fn render_sidebar(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
                 } else {
                     Style::default().add_modifier(Modifier::BOLD)
                 };
-                let line = Line::from(vec![
-                    Span::raw(format!("{chevron} ")),
-                    Span::styled(name, name_style),
-                    Span::styled(format!("  ({n})"), Style::default().fg(Color::DarkGray)),
-                ]);
-                items.push(ListItem::new(line));
+                let mut pspans = vec![Span::raw(format!("{chevron} "))];
+                if mixed {
+                    if let Some(p) = proj {
+                        pspans.push(Span::styled(source_badge_text(p.source), badge_style));
+                        pspans.push(Span::raw(" "));
+                    }
+                }
+                pspans.push(Span::styled(name, name_style));
+                pspans.push(Span::styled(
+                    format!("  ({n})"),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                items.push(ListItem::new(Line::from(pspans)));
             }
             SidebarRow::Session {
                 session_id, closed, ..
@@ -162,11 +173,19 @@ fn render_sidebar(f: &mut Frame, store: &Store, app: &AppState, area: Rect) {
                     Span::raw("  "),
                     Span::styled(bullet, Style::default().fg(live_color)),
                     Span::raw(" "),
-                    Span::styled(
-                        truncate_line(&label, area.width.saturating_sub(10) as usize),
-                        label_style,
-                    ),
                 ];
+                let mut reserved = 10u16;
+                if mixed {
+                    if let Some(sess) = s {
+                        spans.push(Span::styled(source_badge_text(sess.source), badge_style));
+                        spans.push(Span::raw(" "));
+                        reserved = reserved.saturating_add(3);
+                    }
+                }
+                spans.push(Span::styled(
+                    truncate_line(&label, area.width.saturating_sub(reserved) as usize),
+                    label_style,
+                ));
                 if sidechain > 0 {
                     spans.push(Span::styled(
                         format!("  ↳{sidechain}"),
@@ -1655,8 +1674,21 @@ fn c_milk() -> Color {
 fn c_grind() -> Color {
     theme::current().thinking
 }
+fn c_badge() -> Color {
+    // Reuse the muted "thinking" slot for the source badge — present and
+    // distinct-but-subdued in all 10 themes, so no new theme slot is needed.
+    theme::current().thinking
+}
 fn c_ctx_filled() -> Color {
     theme::current().ctx_filled
+}
+
+/// Compact source tag for the sidebar badge (`cc` = Claude Code, `oc` = OpenCode).
+fn source_badge_text(kind: crate::data::SourceKind) -> &'static str {
+    match kind {
+        crate::data::SourceKind::Claude => "cc",
+        crate::data::SourceKind::Opencode => "oc",
+    }
 }
 fn c_ctx_empty() -> Color {
     theme::current().ctx_empty
