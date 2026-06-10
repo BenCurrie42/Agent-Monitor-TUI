@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -44,6 +44,27 @@ impl Project {
             source: SourceKind::Claude,
         }
     }
+
+    /// Create a project with an explicit display path (for sources that don't
+    /// use the Claude slug encoding, e.g. OpenCode whose project IDs are
+    /// opaque hashes and whose display paths come from a `worktree` field).
+    ///
+    /// Wired into the main binary in PRD-07.
+    #[allow(dead_code)]
+    pub fn with_display_path(
+        slug: String,
+        path: PathBuf,
+        display_path: String,
+        source: SourceKind,
+    ) -> Self {
+        Self {
+            slug,
+            path,
+            display_path,
+            sessions: Vec::new(),
+            source,
+        }
+    }
 }
 
 /// Decode `~/.claude/projects/-Users-x--config-nix` → `/Users/x/.config/nix`.
@@ -81,6 +102,18 @@ pub fn decode_slug(slug: &str) -> String {
         }
     }
     out
+}
+
+/// Convert a Unix epoch millisecond timestamp (as used by OpenCode) to a
+/// `DateTime<Utc>`. Returns `None` for out-of-range values.
+///
+/// Do NOT use `Utc.timestamp_opt` (seconds) for OpenCode times — they are
+/// milliseconds and would produce dates far in the future.
+///
+/// Wired into the main binary via PRD-03/04 (OpenCode metadata scan).
+#[allow(dead_code)]
+pub fn timestamp_from_millis(ms: i64) -> Option<DateTime<Utc>> {
+    Utc.timestamp_millis_opt(ms).single()
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +159,12 @@ pub struct Session {
     pub last_input_tokens: Option<u64>,
     /// Originating data source. Defaults to `Claude`.
     pub source: SourceKind,
+    /// Parent session id. Set for OpenCode sub-agent sessions (those with a
+    /// `parentID` field in the session JSON). Used by the sidebar to group
+    /// sub-agents independently of the Claude `is_background` heuristic.
+    /// Read starting with PRD-03 (is_sub_agent predicate in app.rs).
+    #[allow(dead_code)]
+    pub parent_id: Option<String>,
 }
 
 impl Session {
@@ -156,6 +195,7 @@ impl Session {
             tool_result_index: HashMap::new(),
             last_input_tokens: None,
             source: SourceKind::Claude,
+            parent_id: None,
         }
     }
 
@@ -581,6 +621,21 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamp_from_millis_known_value() {
+        // 1780688974507 ms → 2026-06-05 19:49:34 UTC (OpenCode fixture value)
+        let ts = timestamp_from_millis(1_780_688_974_507).expect("should parse");
+        assert_eq!(ts.timestamp_millis(), 1_780_688_974_507);
+        // Year must be 2026, not year ~58000 (which seconds would give).
+        assert_eq!(ts.format("%Y").to_string(), "2026");
+    }
+
+    #[test]
+    fn timestamp_from_millis_zero_is_epoch() {
+        let ts = timestamp_from_millis(0).expect("epoch");
+        assert_eq!(ts.timestamp(), 0);
+    }
 
     #[test]
     fn decode_slug_basic() {

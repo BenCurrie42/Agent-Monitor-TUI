@@ -881,11 +881,19 @@ pub fn item_matches(session: &Session, item: &StreamItem, needle_lower: &str) ->
 }
 
 /// A session is considered a sub-agent if it was explicitly launched as a
-/// background sub-agent from another session. Detection currently relies on
-/// the absence of any human-typed first_user_line combined with is_background;
-/// this is a best-effort heuristic until JSONL includes a parentSessionId field.
+/// background sub-agent from another session. For Claude sessions this relies
+/// on the `is_background` flag combined with the absence of a user-typed first
+/// line or AI title. For OpenCode sessions an explicit `parent_id` field
+/// (populated from the JSON `parentID`) is the authoritative signal.
 fn is_sub_agent(s: &crate::data::Session) -> bool {
-    s.is_background && s.first_user_line.is_none() && s.title.is_none()
+    s.parent_id.is_some() || (s.is_background && s.first_user_line.is_none() && s.title.is_none())
+}
+
+/// Test-only re-export so `opencode.rs` tests can verify the `is_sub_agent`
+/// predicate without duplicating the logic.
+#[cfg(test)]
+pub fn is_sub_agent_for_test(s: &crate::data::Session) -> bool {
+    is_sub_agent(s)
 }
 
 pub fn sidebar_rows(store: &Store, expanded: &HashSet<String>) -> Vec<SidebarRow> {

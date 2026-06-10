@@ -14,8 +14,13 @@ use anyhow::Result;
 use crate::data::{Project, Session, SourceKind};
 
 mod claude;
+mod opencode;
 
 pub use claude::ClaudeSource;
+// OpencodeSource is wired into main in PRD-07; it is re-exported here so it is
+// reachable and tested without any dead-code lint noise.
+#[allow(unused_imports)]
+pub use opencode::OpencodeSource;
 
 /// Everything that varies between data sources (Claude Code, OpenCode, …).
 ///
