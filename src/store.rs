@@ -16,6 +16,16 @@ use crate::sources::Source;
 pub const LIVE_THRESHOLD_SECS: i64 = 300;
 
 pub fn is_session_live(s: &Session) -> bool {
+    // Route by source: each source's liveness model is different. Claude uses
+    // the five-tier process cascade; OpenCode uses recency-only (see below).
+    match s.source {
+        SourceKind::Claude => is_claude_session_live(s),
+        SourceKind::Opencode => is_opencode_session_live(s),
+    }
+}
+
+/// Claude's five-tier liveness cascade (unchanged by PRD-06).
+fn is_claude_session_live(s: &Session) -> bool {
     // 1. Definitive: user typed `/exit` (or `/quit`).
     if s.exit_observed {
         return false;
@@ -37,6 +47,26 @@ pub fn is_session_live(s: &Session) -> bool {
         return false;
     }
     // 5. No process info for this project — fall back to timestamp heuristic.
+    let Some(t) = s.last_event.or(s.last_mtime) else {
+        return false;
+    };
+    Utc::now().signed_duration_since(t).num_seconds() < LIVE_THRESHOLD_SECS
+}
+
+/// OpenCode liveness is RECENCY-ONLY.
+///
+/// OpenCode's `projectID` is an opaque content hash, NOT derivable from a
+/// process CWD path, so `slug_for_cwd` can't attribute a running `opencode`
+/// process to a session/project the way `lsof -c claude` does for Claude.
+/// Rather than fabricate an attribution that can't be correct, we ship
+/// recency-only liveness (PRD-06: "recency-only liveness is an acceptable ship
+/// — document the choice"): a session is live if its `time.updated`
+/// (`last_event`, falling back to file mtime) is within `LIVE_THRESHOLD_SECS`.
+/// An explicit ended/`exit_observed` signal still wins first if present.
+fn is_opencode_session_live(s: &Session) -> bool {
+    if s.exit_observed {
+        return false;
+    }
     let Some(t) = s.last_event.or(s.last_mtime) else {
         return false;
     };
@@ -146,10 +176,15 @@ impl Store {
     /// Delete all closed (non-live) sessions from disk and remove them from the store.
     /// Returns the number of sessions deleted.
     pub fn delete_closed_sessions(&mut self) -> usize {
+        // Single-file disk delete only makes sense for Claude (one jsonl per
+        // session). An OpenCode session spans session/, message/<sid>/ and
+        // part/<mid>/ files, so a single `remove_file` would orphan the rest;
+        // multi-file OpenCode deletion is out of scope for PRD-06, so gate this
+        // to Claude sessions.
         let closed_ids: Vec<String> = self
             .sessions
             .iter()
-            .filter(|(_, s)| !is_session_live(s))
+            .filter(|(_, s)| s.source == SourceKind::Claude && !is_session_live(s))
             .map(|(id, _)| id.clone())
             .collect();
         let count = closed_ids.len();
@@ -231,9 +266,17 @@ impl Store {
     }
 
     fn on_removed(&mut self, path: &Path) {
-        let Some((_src, sid)) = self.owner_of_path(path) else {
+        let Some((src, sid)) = self.owner_of_path(path) else {
             return;
         };
+        // Only remove the session when the deleted path is the session's own
+        // root-defining file. For Claude the single `*.jsonl` IS the session, so
+        // any owned path qualifies (default impl). For OpenCode a session spans
+        // many files: deleting a `part/` or `message/` file must NOT delete the
+        // session — only deletion of `session/<pid>/<sid>.json` does.
+        if !src.is_session_root_file(path, &sid) {
+            return;
+        }
         let slug = self.sessions.get(&sid).map(|s| s.project_slug.clone());
         self.sessions.remove(&sid);
         if let Some(slug) = slug {
@@ -340,4 +383,212 @@ pub enum FsEvent {
     Created(PathBuf),
     Modified(PathBuf),
     Removed(PathBuf),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sources::OpencodeSource;
+    use std::fs;
+
+    /// Self-cleaning temp dir.
+    struct TmpDir(PathBuf);
+    impl TmpDir {
+        fn new(label: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("am-store-{}-{}", std::process::id(), label));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            TmpDir(dir)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn mk_session(source: SourceKind, last_event_secs_ago: i64) -> Session {
+        let mut s = Session::new("sid".into(), "slug".into(), PathBuf::from("/tmp/x"));
+        s.source = source;
+        s.last_event = Some(Utc::now() - chrono::Duration::seconds(last_event_secs_ago));
+        s
+    }
+
+    // ── Liveness routing ──────────────────────────────────────────────────────
+
+    #[test]
+    fn opencode_liveness_is_recency_based() {
+        // Recent → live.
+        assert!(is_session_live(&mk_session(SourceKind::Opencode, 10)));
+        // Stale → dead.
+        assert!(!is_session_live(&mk_session(
+            SourceKind::Opencode,
+            LIVE_THRESHOLD_SECS + 60
+        )));
+        // Explicit exit wins even when recent.
+        let mut s = mk_session(SourceKind::Opencode, 10);
+        s.exit_observed = true;
+        assert!(!is_session_live(&s));
+    }
+
+    #[test]
+    fn opencode_liveness_ignores_process_fields() {
+        // OpenCode can't attribute processes; process_* fields must not flip the
+        // recency verdict. A stale OpenCode session stays dead even if some
+        // process flag is set, and a recent one stays live.
+        let mut stale = mk_session(SourceKind::Opencode, LIVE_THRESHOLD_SECS + 60);
+        stale.process_open = true;
+        assert!(
+            !is_session_live(&stale),
+            "recency-only ignores process_open"
+        );
+
+        let mut recent = mk_session(SourceKind::Opencode, 10);
+        recent.process_ever_open = true;
+        recent.project_has_claude = true;
+        assert!(is_session_live(&recent), "recency-only: recent => live");
+    }
+
+    #[test]
+    fn claude_liveness_cascade_unchanged() {
+        // process_open → live regardless of recency.
+        let mut s = mk_session(SourceKind::Claude, LIVE_THRESHOLD_SECS + 60);
+        s.process_open = true;
+        assert!(is_session_live(&s));
+
+        // project_has_claude but not process_open → dead even though recent.
+        let mut s = mk_session(SourceKind::Claude, 10);
+        s.project_has_claude = true;
+        assert!(!is_session_live(&s));
+
+        // process_ever_open and gone → dead.
+        let mut s = mk_session(SourceKind::Claude, 10);
+        s.process_ever_open = true;
+        assert!(!is_session_live(&s));
+
+        // No process info, recent → live via timestamp fallback.
+        assert!(is_session_live(&mk_session(SourceKind::Claude, 10)));
+        // No process info, stale → dead.
+        assert!(!is_session_live(&mk_session(
+            SourceKind::Claude,
+            LIVE_THRESHOLD_SECS + 60
+        )));
+    }
+
+    // ── on_removed trap: part/message delete keeps session; session-file
+    //    delete removes it ─────────────────────────────────────────────────────
+
+    const PROJECT_ID: &str = "proj_hash_abc";
+    const SESSION_ID: &str = "ses_abc123";
+
+    /// Build a minimal OpenCode store fixture with one loaded-ish session.
+    fn opencode_store_fixture(root: &Path) -> Store {
+        let proj_dir = root.join("project");
+        let sess_dir = root.join("session").join(PROJECT_ID);
+        fs::create_dir_all(&proj_dir).unwrap();
+        fs::create_dir_all(&sess_dir).unwrap();
+        fs::write(
+            proj_dir.join(format!("{PROJECT_ID}.json")),
+            format!(
+                r#"{{ "id":"{PROJECT_ID}", "worktree":"/tmp/wt", "vcs":"git",
+                     "time":{{"created":1,"updated":2}} }}"#
+            ),
+        )
+        .unwrap();
+        let sess_file = sess_dir.join(format!("{SESSION_ID}.json"));
+        fs::write(
+            &sess_file,
+            format!(
+                r#"{{ "id":"{SESSION_ID}", "projectID":"{PROJECT_ID}",
+                     "directory":"/tmp/wt", "title":"t",
+                     "time":{{"created":1,"updated":2}} }}"#
+            ),
+        )
+        .unwrap();
+
+        let src: Arc<dyn Source> = Arc::new(OpencodeSource::new(root.to_path_buf()));
+        let mut store = Store::new(vec![src]);
+        store.initial_scan().unwrap();
+        store
+    }
+
+    #[test]
+    fn on_removed_keeps_session_when_part_or_message_deleted() {
+        let tmp = TmpDir::new("rm-part");
+        let mut store = opencode_store_fixture(tmp.path());
+        assert!(store.sessions.contains_key(SESSION_ID));
+
+        // Deleting a message file must NOT remove the session.
+        let msg_file = tmp
+            .path()
+            .join("message")
+            .join(SESSION_ID)
+            .join("msg_1.json");
+        store.apply_fs_event(FsEvent::Removed(msg_file), false);
+        assert!(
+            store.sessions.contains_key(SESSION_ID),
+            "message delete must not remove session"
+        );
+
+        // Deleting a part file must NOT remove the session.
+        let part_file = tmp.path().join("part").join("msg_1").join("prt_1.json");
+        store.apply_fs_event(FsEvent::Removed(part_file), false);
+        assert!(
+            store.sessions.contains_key(SESSION_ID),
+            "part delete must not remove session"
+        );
+    }
+
+    #[test]
+    fn on_removed_removes_session_when_session_file_deleted() {
+        let tmp = TmpDir::new("rm-sess");
+        let mut store = opencode_store_fixture(tmp.path());
+        assert!(store.sessions.contains_key(SESSION_ID));
+
+        let sess_file = tmp
+            .path()
+            .join("session")
+            .join(PROJECT_ID)
+            .join(format!("{SESSION_ID}.json"));
+        store.apply_fs_event(FsEvent::Removed(sess_file), false);
+        assert!(
+            !store.sessions.contains_key(SESSION_ID),
+            "session-file delete must remove the session"
+        );
+    }
+
+    #[test]
+    fn on_removed_claude_jsonl_delete_removes_session() {
+        let tmp = TmpDir::new("rm-claude");
+        let slug = "-tmp-proj";
+        let sid = "11111111-2222-3333-4444-555555555555";
+        let proj_dir = tmp.path().join(slug);
+        fs::create_dir_all(&proj_dir).unwrap();
+        let file = proj_dir.join(format!("{sid}.jsonl"));
+        fs::write(
+            &file,
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2026-05-22T17:19:35.133Z","#,
+                r#""cwd":"/tmp/proj","message":{"role":"user","content":"hi"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let src: Arc<dyn Source> = Arc::new(crate::sources::ClaudeSource::new(tmp.path().into()));
+        let mut store = Store::new(vec![src]);
+        store.initial_scan().unwrap();
+        assert!(store.sessions.contains_key(sid));
+
+        // Removing the single jsonl IS the session file → session removed.
+        store.apply_fs_event(FsEvent::Removed(file), false);
+        assert!(
+            !store.sessions.contains_key(sid),
+            "Claude jsonl delete removes the session"
+        );
+    }
 }

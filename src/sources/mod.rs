@@ -61,6 +61,18 @@ pub trait Source: Send + Sync {
     /// it works for removed paths too.
     fn session_id_for_path(&self, path: &Path) -> Option<String>;
 
+    /// True if `path` is the canonical session-defining file for `sid` — i.e.
+    /// deleting it means the session itself is gone (vs. deleting one of a
+    /// session's many auxiliary files, which must NOT remove the session).
+    ///
+    /// For Claude the session IS its single `*.jsonl`, so any owned path is the
+    /// root file (default impl). OpenCode overrides this: a session spans
+    /// `session/`, `message/<sid>/`, and `part/<mid>/` files, but only the
+    /// `session/<pid>/<sid>.json` file is the root.
+    fn is_session_root_file(&self, _path: &Path, _sid: &str) -> bool {
+        true
+    }
+
     /// Working dirs of this source's running processes (one entry per process,
     /// duplicates preserved) — used for liveness attribution.
     fn active_dirs(&self) -> Vec<PathBuf>;

@@ -109,6 +109,12 @@ struct CacheJson {
 struct PartJson {
     #[serde(rename = "type")]
     part_type: String,
+    /// The owning session id. Every part carries this; used to resolve a
+    /// `part/<mid>/<pid>.json` path back to its session in
+    /// `session_id_for_path` without a `messageID → sessionID` cache.
+    #[serde(rename = "sessionID")]
+    #[allow(dead_code)]
+    session_id: Option<String>,
     text: Option<String>,
     time: Option<PartTime>,
     // tool fields:
@@ -201,6 +207,58 @@ impl OpencodeSource {
             }
         }
         sessions
+    }
+
+    /// List + parse every `message/<sid>/*.json`, sorted by `time.created`
+    /// (then message id for stability). Returns `(message_id, MessageJson)`
+    /// pairs. Shared by `load_session` (parse all) and `refresh_session`
+    /// (parse, then filter to the delta).
+    fn list_messages(&self, sid: &str) -> Vec<(String, MessageJson)> {
+        let msg_dir = self.root.join("message").join(sid);
+        let mut messages: Vec<(String, MessageJson)> = Vec::new();
+        if let Ok(entries) = fs::read_dir(&msg_dir) {
+            for ent in entries.flatten() {
+                let p = ent.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(mid) = p.file_stem().and_then(|s| s.to_str()).map(String::from) else {
+                    continue;
+                };
+                let Ok(data) = fs::read_to_string(&p) else {
+                    continue;
+                };
+                let Ok(mj) = serde_json::from_str::<MessageJson>(&data) else {
+                    continue;
+                };
+                messages.push((mid, mj));
+            }
+        }
+        messages.sort_by(|(aid, a), (bid, b)| {
+            a.time
+                .created
+                .cmp(&b.time.created)
+                .then_with(|| aid.cmp(bid))
+        });
+        messages
+    }
+
+    /// Read one message's parts and emit its events onto `session`, mirroring
+    /// the per-message mapping used by the full load. Records the message id in
+    /// `loaded_msg_ids` so a later refresh skips it.
+    fn emit_message(&self, session: &mut Session, mid: &str, mj: &MessageJson) {
+        let parts = self.load_parts(mid);
+        let ts = timestamp_from_millis(mj.time.created);
+        let model = match (&mj.provider_id, &mj.model_id) {
+            (Some(p), Some(m)) => Some(format!("{p}/{m}")),
+            _ => None,
+        };
+        if mj.role == "assistant" {
+            self.emit_assistant(session, mj, &parts, ts, model);
+        } else {
+            self.emit_user(session, &parts, ts);
+        }
+        session.loaded_msg_ids.insert(mid.to_string());
     }
 
     /// Read + sort the parts for one message. Order by `time.start` when present,
@@ -563,61 +621,36 @@ impl Source for OpencodeSource {
     /// by `time.created`), and for each its `part/<mid>/*.json` (ordered by
     /// `time.start` then filename), mapping them onto the shared `Event` model.
     fn load_session(&self, session: &mut Session) -> Result<()> {
-        let sid = &session.id;
+        let sid = session.id.clone();
         session.events.clear();
         session.usage_totals = Default::default();
         session.last_input_tokens = None;
         session.tool_use_index.clear();
         session.tool_result_index.clear();
+        session.loaded_msg_ids.clear();
 
-        // 1. List + parse messages, then sort by time.created.
-        let msg_dir = self.root.join("message").join(sid);
-        let mut messages: Vec<(PathBuf, String, MessageJson)> = Vec::new();
-        if let Ok(entries) = fs::read_dir(&msg_dir) {
-            for ent in entries.flatten() {
-                let p = ent.path();
-                if p.extension().and_then(|s| s.to_str()) != Some("json") {
-                    continue;
-                }
-                let Some(mid) = p.file_stem().and_then(|s| s.to_str()).map(String::from) else {
-                    continue;
-                };
-                let Ok(data) = fs::read_to_string(&p) else {
-                    continue;
-                };
-                let Ok(mj) = serde_json::from_str::<MessageJson>(&data) else {
-                    continue;
-                };
-                messages.push((p, mid, mj));
-            }
-        }
-        messages.sort_by_key(|(_, _, mj)| mj.time.created);
-
-        // 2. For each message, read its parts and emit events.
-        for (_path, mid, mj) in &messages {
-            let parts = self.load_parts(mid);
-            let ts = timestamp_from_millis(mj.time.created);
-            let is_assistant = mj.role == "assistant";
-            let model = match (&mj.provider_id, &mj.model_id) {
-                (Some(p), Some(m)) => Some(format!("{p}/{m}")),
-                _ => None,
-            };
-
-            if is_assistant {
-                self.emit_assistant(session, mj, &parts, ts, model);
-            } else {
-                self.emit_user(session, &parts, ts);
-            }
+        // List + parse messages (sorted), then emit each message's events.
+        let messages = self.list_messages(&sid);
+        for (mid, mj) in &messages {
+            self.emit_message(session, mid, mj);
         }
 
         session.loaded = true;
         Ok(())
     }
 
-    /// PRD-04 stub: incremental refresh is not yet implemented for OpenCode.
+    /// Incremental refresh for OpenCode.
+    ///
+    /// OpenCode writes many small whole-file JSONs (one per message/part)
+    /// rather than appending to a single file, so the Claude byte-offset tail
+    /// doesn't apply. Instead we track already-loaded message ids in
+    /// `session.loaded_msg_ids`: re-list the message dir, parse + emit ONLY the
+    /// messages absent from that set (sorted, so they append in order), and
+    /// leave existing events untouched. This is idempotent against coalesced or
+    /// duplicate FS events — a message already in the set is never re-emitted.
     fn refresh_session(&self, session: &mut Session) -> Result<()> {
         if !session.loaded {
-            // Re-read the session JSON to refresh metadata.
+            // Not yet fully loaded: refresh the cheap metadata scan only.
             if let Some(updated) = self.parse_session_file(
                 &session.file.clone(),
                 &session.project_slug.clone(),
@@ -629,23 +662,55 @@ impl Source for OpencodeSource {
                 session.cwd = updated.cwd;
                 session.parent_id = updated.parent_id;
             }
+            return Ok(());
         }
-        // TODO(PRD-04): tail-load events for loaded sessions.
+
+        // Loaded: append only messages we haven't parsed yet, in time order.
+        let sid = session.id.clone();
+        let messages = self.list_messages(&sid);
+        for (mid, mj) in &messages {
+            if session.loaded_msg_ids.contains(mid) {
+                continue;
+            }
+            self.emit_message(session, mid, mj);
+        }
         Ok(())
     }
 
     fn session_id_for_path(&self, path: &Path) -> Option<String> {
-        // Must be a .json file under session/<anything>/<sid>.json
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             return None;
         }
-        // Check it lives inside our root/session/ subtree.
-        let session_root = self.root.join("session");
-        if !path.starts_with(&session_root) {
-            return None;
+        // session/<pid>/<sid>.json → the session id is the file stem.
+        if path.starts_with(self.root.join("session")) {
+            return path.file_stem().and_then(|s| s.to_str()).map(String::from);
         }
-        // The session id is the stem of the filename.
-        path.file_stem().and_then(|s| s.to_str()).map(String::from)
+        // message/<sid>/<mid>.json → the session id is the parent dir name.
+        if path.starts_with(self.root.join("message")) {
+            return path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(String::from);
+        }
+        // part/<mid>/<pid>.json → the part json carries `sessionID`; read it.
+        // (A messageID→sessionID cache would be a valid optimization, but the
+        // file is tiny so a direct read is sufficient per the PRD.)
+        if path.starts_with(self.root.join("part")) {
+            let data = fs::read_to_string(path).ok()?;
+            let pj: PartJson = serde_json::from_str(&data).ok()?;
+            return pj.session_id;
+        }
+        None
+    }
+
+    fn is_session_root_file(&self, path: &Path, sid: &str) -> bool {
+        // Only `session/<pid>/<sid>.json` is the session's defining file.
+        // Deleting a message/ or part/ file must NOT remove the session.
+        if !path.starts_with(self.root.join("session")) {
+            return false;
+        }
+        path.file_stem().and_then(|s| s.to_str()) == Some(sid)
     }
 
     /// OpenCode liveness via process detection is out of scope for PRD-03
@@ -1159,6 +1224,169 @@ mod tests {
         } else {
             panic!("expected tool result event");
         }
+    }
+
+    // ── PRD-06: session_id_for_path for all three path shapes ─────────────────
+
+    #[test]
+    fn session_id_for_path_session_file() {
+        let tmp = TmpDir::new("sidpath-sess");
+        write_fixture(tmp.path());
+        let src = OpencodeSource::new(tmp.path().to_path_buf());
+        let p = tmp
+            .path()
+            .join("session")
+            .join(PROJECT_ID)
+            .join(format!("{SESSION_ID}.json"));
+        assert_eq!(src.session_id_for_path(&p).as_deref(), Some(SESSION_ID));
+    }
+
+    #[test]
+    fn session_id_for_path_message_file() {
+        let tmp = TmpDir::new("sidpath-msg");
+        let src = OpencodeSource::new(tmp.path().to_path_buf());
+        // message/<sid>/<mid>.json → parent dir name is the session id.
+        let p = tmp
+            .path()
+            .join("message")
+            .join(SESSION_ID)
+            .join("msg_abc.json");
+        assert_eq!(src.session_id_for_path(&p).as_deref(), Some(SESSION_ID));
+    }
+
+    #[test]
+    fn session_id_for_path_part_file_reads_session_id_field() {
+        let tmp = TmpDir::new("sidpath-part");
+        let src = OpencodeSource::new(tmp.path().to_path_buf());
+        // part/<mid>/<pid>.json carries sessionID inside the file.
+        let mid = "msg_xyz";
+        let part_dir = tmp.path().join("part").join(mid);
+        fs::create_dir_all(&part_dir).unwrap();
+        let part_file = part_dir.join("prt_1.json");
+        fs::write(
+            &part_file,
+            format!(
+                r#"{{ "type":"text", "messageID":"{mid}", "sessionID":"{SESSION_ID}", "text":"hi" }}"#
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            src.session_id_for_path(&part_file).as_deref(),
+            Some(SESSION_ID)
+        );
+    }
+
+    #[test]
+    fn session_id_for_path_non_owned_returns_none() {
+        let tmp = TmpDir::new("sidpath-none");
+        let src = OpencodeSource::new(tmp.path().to_path_buf());
+        // A project json is not a session-owned path.
+        let proj = tmp
+            .path()
+            .join("project")
+            .join(format!("{PROJECT_ID}.json"));
+        assert_eq!(src.session_id_for_path(&proj), None);
+        // A non-json file under message/ is not owned.
+        let other = tmp.path().join("message").join(SESSION_ID).join("x.txt");
+        assert_eq!(src.session_id_for_path(&other), None);
+    }
+
+    // ── PRD-06: is_session_root_file (the on_removed correctness trap) ─────────
+
+    #[test]
+    fn is_session_root_file_only_for_session_json() {
+        let tmp = TmpDir::new("rootfile");
+        let src = OpencodeSource::new(tmp.path().to_path_buf());
+        let sess_file = tmp
+            .path()
+            .join("session")
+            .join(PROJECT_ID)
+            .join(format!("{SESSION_ID}.json"));
+        assert!(src.is_session_root_file(&sess_file, SESSION_ID));
+        // A message file for the same session is NOT the root file.
+        let msg_file = tmp
+            .path()
+            .join("message")
+            .join(SESSION_ID)
+            .join("msg_a.json");
+        assert!(!src.is_session_root_file(&msg_file, SESSION_ID));
+        // A part file is NOT the root file either.
+        let part_file = tmp.path().join("part").join("msg_a").join("prt_1.json");
+        assert!(!src.is_session_root_file(&part_file, SESSION_ID));
+    }
+
+    // ── PRD-06: incremental refresh_session (delta append, no duplicates) ──────
+
+    #[test]
+    fn refresh_session_appends_only_new_messages() {
+        let tmp = TmpDir::new("refresh");
+        write_fixture(tmp.path());
+        let root = tmp.path();
+        let sid = SESSION_ID;
+
+        // Initial: one user message.
+        write_message(
+            root,
+            sid,
+            "msg_001",
+            r#"{ "id":"msg_001", "sessionID":"ses_x", "role":"user",
+                "time":{"created":1781045149000} }"#,
+            &[(
+                "prt_1",
+                r#"{ "type":"text", "text":"first", "time":{"start":1781045149000} }"#,
+            )],
+        );
+
+        let src = OpencodeSource::new(root.to_path_buf());
+        let mut session = Session::new(sid.to_string(), PROJECT_ID.to_string(), {
+            root.join("session")
+                .join(PROJECT_ID)
+                .join(format!("{sid}.json"))
+        });
+        session.source = SourceKind::Opencode;
+        src.load_session(&mut session).unwrap();
+        assert_eq!(session.events.len(), 1);
+        assert!(session.loaded_msg_ids.contains("msg_001"));
+
+        // Add a NEW assistant message + parts, with usage.
+        write_message(
+            root,
+            sid,
+            "msg_002",
+            r#"{ "id":"msg_002", "sessionID":"ses_x", "role":"assistant",
+                "time":{"created":1781045150000},
+                "modelID":"m", "providerID":"p", "cost":0.5,
+                "tokens":{"input":200,"output":10,"reasoning":0,"cache":{"read":3,"write":1}} }"#,
+            &[(
+                "prt_2",
+                r#"{ "type":"text", "text":"answer", "time":{"start":1781045150000} }"#,
+            )],
+        );
+
+        src.refresh_session(&mut session).unwrap();
+        // Exactly one new event appended (the assistant turn); no duplicate of msg_001.
+        assert_eq!(session.events.len(), 2, "one new assistant event appended");
+        match &session.events[0].event {
+            Event::User(UserContent::Text(s)) => assert_eq!(s, "first"),
+            other => panic!("expected first user event preserved, got {other:?}"),
+        }
+        match &session.events[1].event {
+            Event::Assistant { blocks, .. } => {
+                assert_eq!(blocks.len(), 1);
+                assert!(matches!(blocks[0], AssistantBlock::Text { .. }));
+            }
+            other => panic!("expected assistant event, got {other:?}"),
+        }
+        assert!(session.loaded_msg_ids.contains("msg_002"));
+        // Usage accumulated from the new message.
+        assert_eq!(session.usage_totals.input, 200);
+        assert!((session.usage_totals.cost_usd - 0.5).abs() < 1e-9);
+        assert_eq!(session.last_input_tokens, Some(200 + 3 + 1));
+
+        // Idempotent: a second refresh with no new files appends nothing.
+        src.refresh_session(&mut session).unwrap();
+        assert_eq!(session.events.len(), 2, "no duplicates on repeat refresh");
+        assert_eq!(session.usage_totals.input, 200, "usage not double-counted");
     }
 
     #[test]

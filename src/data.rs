@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -157,6 +157,12 @@ pub struct Session {
     pub tool_result_index: HashMap<String, (usize, usize)>,
     /// input_tokens from the most recent assistant turn — represents current context size.
     pub last_input_tokens: Option<u64>,
+    /// OpenCode incremental-load bookkeeping: the message ids already parsed
+    /// into `events`. OpenCode writes many small whole-file JSONs (one per
+    /// message/part) rather than appending to a single file, so byte-offset
+    /// tailing doesn't apply; `refresh_session` re-lists the message dir and
+    /// parses only ids absent from this set. Empty/unused for Claude.
+    pub loaded_msg_ids: HashSet<String>,
     /// Originating data source. Defaults to `Claude`.
     pub source: SourceKind,
     /// Parent session id. Set for OpenCode sub-agent sessions (those with a
@@ -194,6 +200,7 @@ impl Session {
             tool_use_index: HashMap::new(),
             tool_result_index: HashMap::new(),
             last_input_tokens: None,
+            loaded_msg_ids: HashSet::new(),
             source: SourceKind::Claude,
             parent_id: None,
         }
